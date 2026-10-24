@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <script>
+      // Suppress Vite HMR WebSocket connection errors per environment guidelines
+      window.addEventListener('error', function(event) {
+        if (event && (event.message && (event.message.includes('WebSocket') || event.message.includes('@vite/client')) || (event.filename && event.filename.includes('@vite/client')))) {
+          event.stopImmediatePropagation();
+          event.preventDefault();
+        }
+      }, true);
+      window.addEventListener('unhandledrejection', function(event) {
+        if (event && (String(event.reason).includes('WebSocket') || (event.reason && event.reason.message && event.reason.message.includes('WebSocket')))) {
+          event.stopImmediatePropagation();
+          event.preventDefault();
+        }
+      }, true);
+    </script>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/png" href="/src/components/logo.png" />
+    <title>GestorFlix - Gestão e Cobrança Automática WhatsApp</title>
+    <meta name="description" content="GestorFlix: Sistema completo para revendedores de IPTV com gestão de clientes, planos, aplicativos, controle de vencimentos e cobranças automáticas via WhatsApp. Licença vitalícia por R$ 99,90 valor único sem mensalidades." />
+    <meta property="og:title" content="GestorFlix - Gestão e Cobrança Automática WhatsApp" />
+    <meta property="og:description" content="GestorFlix: Sistema completo para revendedores de IPTV com gestão de clientes, planos, aplicativos, controle de vencimentos e cobranças automáticas via WhatsApp. Licença vitalícia por R$ 99,90 valor único sem mensalidades." />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

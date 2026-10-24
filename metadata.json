@@ -1,0 +1,6 @@
+{
+  "name": "Gestor IPTV - Gestão e Cobrança Automática WhatsApp",
+  "description": "Sistema completo para revendedores de IPTV: gestão de clientes, planos, aplicativos, controle de vencimentos e cobranças automáticas via WhatsApp. Licença vitalícia por R$ 99,90 sem mensalidades.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
