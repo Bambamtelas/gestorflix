@@ -7,3 +7,6 @@ coverage/
 .env*
 !.env.example
 data/evolution-config.json
+backups/
+*.receipt.json
+*.manifest.json

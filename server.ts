@@ -10,6 +10,24 @@ import {
   verifySupabaseToken,
   migrateLegacyUserToSupabase,
   supabaseAdmin,
+  getSupabasePlans,
+  createSupabasePlan,
+  updateSupabasePlan,
+  deleteSupabasePlan,
+  getSupabaseApplications,
+  createSupabaseApplication,
+  updateSupabaseApplication,
+  deleteSupabaseApplication,
+  getSupabaseCustomers,
+  createSupabaseCustomer,
+  updateSupabaseCustomer,
+  deleteSupabaseCustomer,
+  renewSupabaseCustomer,
+  getSupabaseDashboardMetrics,
+  getSupabaseSubscription,
+  ensureSupabaseSubscription,
+  updateSupabaseSubscriptionStatus,
+  isValidUUID,
 } from './src/server/supabaseAdmin';
 
 dotenv.config();
@@ -503,14 +521,146 @@ function getResellerInstanceName(userId: string): string {
   return `gestorflix_${sanitized}`;
 }
 
-// Helper to format WhatsApp number into digits only
+// Helper to format WhatsApp number into digits only, supporting both Brazilian and international E.164 formats
 function normalizeWhatsApp(phone: string): string {
-  let cleaned = phone.replace(/\D/g, '');
-  if (cleaned.length === 10 || cleaned.length === 11) {
-    // If user provided Brazilian DDD without country code 55
+  const trimmed = (phone || '').trim();
+  const hadPlus = trimmed.startsWith('+');
+  let cleaned = trimmed.replace(/\D/g, '');
+  if (!cleaned) return '';
+
+  // If already starts with 55 (Brazil DDI) and is 12 or 13 digits, keep as is
+  if (cleaned.startsWith('55') && (cleaned.length === 12 || cleaned.length === 13)) {
+    return cleaned;
+  }
+
+  // If user explicitly provided country code with '+' or has > 11 digits not starting with 55
+  if (hadPlus && cleaned.length >= 10) {
+    return cleaned;
+  }
+
+  // If user provided Brazilian local number without 55 (10 digits for landline or 11 digits with 9th digit for mobile)
+  if (cleaned.length === 10 || (cleaned.length === 11 && cleaned[2] === '9')) {
     cleaned = '55' + cleaned;
   }
   return cleaned;
+}
+
+// Validates international or Brazilian WhatsApp numbers
+function validateWhatsAppNumber(phone: string): { valid: boolean; normalized: string; error?: string } {
+  if (!phone || typeof phone !== 'string') {
+    return { valid: false, normalized: '', error: 'Informe o número de WhatsApp com DDD.' };
+  }
+  const normalized = normalizeWhatsApp(phone);
+  // International E.164 standard: between 10 and 15 digits
+  if (normalized.length < 10 || normalized.length > 15) {
+    return {
+      valid: false,
+      normalized,
+      error: 'Número de WhatsApp inválido. Deve conter entre 10 e 15 dígitos numéricos (com DDD/DDI).',
+    };
+  }
+  // Brazilian numbers start with 55 and must have 12 or 13 digits (55 + DDD de 2 dígitos + 8 ou 9 dígitos)
+  if (normalized.startsWith('55')) {
+    if (normalized.length !== 12 && normalized.length !== 13) {
+      return {
+        valid: false,
+        normalized,
+        error: 'Número brasileiro inválido. Deve conter DDD de 2 dígitos e 8 ou 9 dígitos (ex: 11999998888).',
+      };
+    }
+    const ddd = parseInt(normalized.substring(2, 4), 10);
+    if (isNaN(ddd) || ddd < 11 || ddd > 99) {
+      return {
+        valid: false,
+        normalized,
+        error: 'DDD brasileiro inválido. Informe um DDD válido entre 11 e 99.',
+      };
+    }
+  }
+  return { valid: true, normalized };
+}
+
+// Sanitizes Evolution API response payload to prevent logging sensitive message text or headers
+function sanitizeEvolutionResponse(data: any): { message_id?: string; status: string; timestamp: string } {
+  const messageId =
+    data?.key?.id ||
+    data?.messageId ||
+    data?.id ||
+    (data?.response?.key?.id) ||
+    undefined;
+
+  const rawStatus = data?.status || data?.message?.status || (messageId ? 'accepted_by_api' : 'processed');
+  const timestamp = data?.messageTimestamp
+    ? new Date(Number(data.messageTimestamp) * 1000).toISOString()
+    : new Date().toISOString();
+
+  return {
+    message_id: messageId ? String(messageId) : undefined,
+    status: String(rawStatus),
+    timestamp,
+  };
+}
+
+// In-memory send locks for atomic concurrency protection within the process
+const activeSendLocks = new Map<string, number>();
+
+function acquireSendLock(key: string, ttlMs: number = 15000): boolean {
+  const now = Date.now();
+  const existingExpiry = activeSendLocks.get(key);
+  if (existingExpiry && existingExpiry > now) {
+    return false; // Active lock already exists
+  }
+  activeSendLocks.set(key, now + ttlMs);
+  return true;
+}
+
+function releaseSendLock(key: string): void {
+  activeSendLocks.delete(key);
+}
+
+// Check recent message logs in db to prevent duplication across processes or recent restarts
+function checkRecentDuplicateSend(
+  userId: string,
+  targetPhone: string,
+  customerId?: string,
+  windowSeconds: number = 15
+): boolean {
+  const cutoffTime = new Date(Date.now() - windowSeconds * 1000).toISOString();
+  const recentLog = db.message_logs.find((log) => {
+    if (log.user_id !== userId) return false;
+    if (log.attempted_at < cutoffTime) return false;
+    if (customerId && log.customer_id === customerId) return true;
+    if (targetPhone && log.whatsapp === targetPhone) return true;
+    return false;
+  });
+  return Boolean(recentLog);
+}
+
+// Helper to update instance connection state only when reliable disconnection evidence is returned
+function checkAndHandleInstanceDisconnect(userId: string, httpStatus: number, responseData: any): void {
+  const errorStr = (
+    String(responseData?.message || '') +
+    ' ' +
+    String(responseData?.error || '') +
+    ' ' +
+    JSON.stringify(responseData || {})
+  ).toLowerCase();
+
+  const isDisconnected =
+    httpStatus === 404 ||
+    errorStr.includes('instance not found') ||
+    errorStr.includes('instance not connected') ||
+    errorStr.includes('connection closed') ||
+    errorStr.includes('connection lost');
+
+  if (isDisconnected) {
+    const ws = db.whatsapp_settings.find((w) => isUserMatch(w.user_id, { id: userId }));
+    if (ws && ws.is_connected) {
+      ws.is_connected = false;
+      ws.last_checked_at = new Date().toISOString();
+      saveDB(db);
+    }
+  }
 }
 
 // Format date to Brazilian format DD/MM/YYYY
@@ -569,40 +719,90 @@ function isUserMatch(recordUserId: string, user?: { id: string; legacy_id?: stri
   return recordUserId === user.id || (Boolean(user.legacy_id) && recordUserId === user.legacy_id);
 }
 
-// Helper to check user subscription status
-function checkUserSubscription(
+// Helper to check user subscription status (Supabase PostgreSQL como fonte única da verdade)
+async function checkUserSubscription(
   userId: string,
   legacyId?: string,
   userRole?: string
-): {
+): Promise<{
   allowed: boolean;
   status: string;
   daysLeft: number;
   hoursLeft: number;
   reason?: string;
-} {
+  subscription?: any;
+}> {
   const user = db.users.find((u) => u.id === userId || (legacyId && u.id === legacyId));
-  if (userRole === 'admin' || (user && user.role === 'admin')) {
-    return { allowed: true, status: 'active', daysLeft: 365, hoursLeft: 8760 };
+  const adminEmail = (process.env.ADMIN_EMAIL || 'chavepixedvandyemis@gmail.com').trim().toLowerCase();
+  const isMasterAdmin = Boolean(user && user.email && user.email.trim().toLowerCase() === adminEmail);
+
+  if (userRole === 'admin' || isMasterAdmin || (user && user.role === 'admin')) {
+    return {
+      allowed: true,
+      status: 'active',
+      daysLeft: 365,
+      hoursLeft: 8760,
+      subscription: {
+        id: 'sub-admin',
+        user_id: userId,
+        status: 'active',
+        trial_ends_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+        current_period_end: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+      },
+    };
   }
 
-  let sub = db.subscriptions.find((s) => s.user_id === userId || (legacyId && s.user_id === legacyId));
+  // 1. Tenta carregar a assinatura autoritativa do Supabase PostgreSQL
+  let sub: any = null;
+  if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(userId)) {
+    try {
+      sub = await getSupabaseSubscription(userId);
+      if (!sub) {
+        // Se ainda não existir no Supabase, provisiona uma única vez no Supabase
+        sub = await ensureSupabaseSubscription(userId, userRole);
+      }
+    } catch (err: any) {
+      console.warn('Aviso: falha ao consultar assinatura no Supabase, usando fallback legado:', err.message);
+    }
+  }
+
+  // 2. Fallback legado em memória / data/db.json (para compatibilidade caso Supabase esteja offline ou para IDs legados)
   if (!sub) {
-    // Para novos usuários criados no Supabase, provisiona o período de 3 dias de teste gratuito
-    const now = new Date();
-    const trialEndsAt = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000).toISOString();
-    sub = {
-      id: 'sub-' + userId,
-      user_id: userId,
-      status: 'trial',
-      trial_ends_at: trialEndsAt,
-      current_period_end: trialEndsAt,
-      created_at: now.toISOString(),
-      updated_at: now.toISOString(),
+    sub = db.subscriptions.find((s) => s.user_id === userId || (legacyId && s.user_id === legacyId));
+    if (!sub) {
+      const now = new Date();
+      const trialEndsAt = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000).toISOString();
+      sub = {
+        id: 'sub-' + userId,
+        user_id: userId,
+        status: 'trial',
+        trial_ends_at: trialEndsAt,
+        current_period_end: trialEndsAt,
+        created_at: now.toISOString(),
+        updated_at: now.toISOString(),
+      };
+      db.subscriptions.push(sub);
+      saveDB(db);
+    }
+  } else {
+    // Sincroniza em memória no db.subscriptions mantendo as datas autoritativas do Supabase
+    const localIdx = db.subscriptions.findIndex((s) => s.user_id === userId || (legacyId && s.user_id === legacyId));
+    const localEntry = {
+      id: sub.id,
+      user_id: sub.user_id,
+      status: sub.status,
+      trial_ends_at: sub.trial_ends_at,
+      current_period_end: sub.current_period_end,
+      payment_reference: sub.payment_reference,
+      notes: sub.notes,
+      created_at: sub.created_at,
+      updated_at: sub.updated_at,
     };
-    db.subscriptions.push(sub);
-    saveDB(db);
-    return { allowed: true, status: 'trial', daysLeft: 3, hoursLeft: 72 };
+    if (localIdx >= 0) {
+      db.subscriptions[localIdx] = localEntry;
+    } else {
+      db.subscriptions.push(localEntry);
+    }
   }
 
   const now = new Date();
@@ -615,34 +815,79 @@ function checkUserSubscription(
   const daysLeft = Math.max(0, Math.floor(msLeft / (1000 * 60 * 60 * 24)));
 
   if (sub.status === 'suspended') {
-    return { allowed: false, status: 'suspended', daysLeft: 0, hoursLeft: 0, reason: 'Sua conta está suspensa pelo administrador.' };
+    return {
+      allowed: false,
+      status: 'suspended',
+      daysLeft: 0,
+      hoursLeft: 0,
+      reason: 'Sua conta está suspensa pelo administrador.',
+      subscription: sub,
+    };
   }
 
   if (sub.status === 'pending_payment') {
-    return { allowed: false, status: 'pending_payment', daysLeft: 0, hoursLeft: 0, reason: 'Pagamento pendente. Regularize sua assinatura para continuar.' };
+    return {
+      allowed: false,
+      status: 'pending_payment',
+      daysLeft: 0,
+      hoursLeft: 0,
+      reason: 'Pagamento pendente. Regularize sua assinatura para continuar.',
+      subscription: sub,
+    };
   }
 
   if (sub.status === 'trial') {
     if (msLeft <= 0) {
-      sub.status = 'expired';
-      sub.updated_at = now.toISOString();
-      saveDB(db);
-      return { allowed: false, status: 'expired', daysLeft: 0, hoursLeft: 0, reason: 'Seu período de teste gratuito de 3 dias expirou. Regularize seu plano.' };
+      if (sub.status !== 'expired') {
+        sub.status = 'expired';
+        sub.updated_at = now.toISOString();
+        if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(userId)) {
+          updateSupabaseSubscriptionStatus(sub.id, 'expired').catch(() => {});
+        }
+        saveDB(db);
+      }
+      return {
+        allowed: false,
+        status: 'expired',
+        daysLeft: 0,
+        hoursLeft: 0,
+        reason: 'Seu período de teste gratuito de 3 dias expirou. Regularize seu plano.',
+        subscription: sub,
+      };
     }
-    return { allowed: true, status: 'trial', daysLeft, hoursLeft };
+    return { allowed: true, status: 'trial', daysLeft, hoursLeft, subscription: sub };
   }
 
   if (sub.status === 'active') {
     if (periodEnd.getTime() <= now.getTime()) {
-      sub.status = 'expired';
-      sub.updated_at = now.toISOString();
-      saveDB(db);
-      return { allowed: false, status: 'expired', daysLeft: 0, hoursLeft: 0, reason: 'Sua assinatura mensal expirou. Realize o pagamento para reativar.' };
+      if (sub.status !== 'expired') {
+        sub.status = 'expired';
+        sub.updated_at = now.toISOString();
+        if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(userId)) {
+          updateSupabaseSubscriptionStatus(sub.id, 'expired').catch(() => {});
+        }
+        saveDB(db);
+      }
+      return {
+        allowed: false,
+        status: 'expired',
+        daysLeft: 0,
+        hoursLeft: 0,
+        reason: 'Sua assinatura mensal expirou. Realize o pagamento para reativar.',
+        subscription: sub,
+      };
     }
-    return { allowed: true, status: 'active', daysLeft, hoursLeft };
+    return { allowed: true, status: 'active', daysLeft, hoursLeft, subscription: sub };
   }
 
-  return { allowed: false, status: 'expired', daysLeft: 0, hoursLeft: 0, reason: 'Assinatura inativa ou expirada.' };
+  return {
+    allowed: false,
+    status: 'expired',
+    daysLeft: 0,
+    hoursLeft: 0,
+    reason: 'Assinatura inativa ou expirada.',
+    subscription: sub,
+  };
 }
 
 // Middleware de Autenticação Segura via Supabase Auth
@@ -697,12 +942,12 @@ async function authenticateUser(req: Request, res: Response, next: NextFunction)
 }
 
 // Middleware to block mutation when subscription expired/inactive
-function requireActiveSubscription(req: Request, res: Response, next: NextFunction) {
+async function requireActiveSubscription(req: Request, res: Response, next: NextFunction) {
   const user = (req as any).user;
   if (!user) return res.status(401).json({ error: 'UNAUTHORIZED' });
   if (user.role === 'admin') return next();
 
-  const subCheck = checkUserSubscription(user.id, user.legacy_id, user.role);
+  const subCheck = await checkUserSubscription(user.id, user.legacy_id, user.role);
   if (!subCheck.allowed) {
     return res.status(403).json({
       error: 'SUBSCRIPTION_REQUIRED',
@@ -726,11 +971,17 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
 // ====================================================================
 // AUTOMATED BILLING SCHEDULER ENGINE (Runs in server background)
 // ====================================================================
-async function runBillingCycleCheck(): Promise<{ processed: number; sent: number; failed: number; skipped: number }> {
+async function runBillingCycleCheck(targetUserId?: string): Promise<{ processed: number; sent: number; failed: number; skipped: number; reason?: string }> {
   let processed = 0;
   let sent = 0;
   let failed = 0;
   let skipped = 0;
+
+  const evolution = getActiveEvolutionConfig();
+  if (!evolution.isConfigured) {
+    console.log('[BillingCycle] Central Evolution API não configurada. Disparos automáticos suspensos de forma segura.');
+    return { processed: 0, sent: 0, failed: 0, skipped: 0, reason: 'central_not_configured' };
+  }
 
   const now = new Date();
   const todayStr = now.toISOString().slice(0, 10);
@@ -738,22 +989,31 @@ async function runBillingCycleCheck(): Promise<{ processed: number; sent: number
   const currentMin = now.getMinutes().toString().padStart(2, '0');
   const currentTime = `${currentHour}:${currentMin}`;
 
-  // Process all users that have auto_billing_enabled
-  for (const user of db.users) {
+  // Process users: if targetUserId is set, isolate strictly to that user; otherwise process all non-admin users
+  const usersToProcess = targetUserId
+    ? db.users.filter((u) => u.id === targetUserId || (u as any).legacy_id === targetUserId)
+    : db.users.filter((u) => u.role !== 'admin');
+
+  for (const user of usersToProcess) {
     if (user.role === 'admin') continue;
 
     // Check if user has active sub
-    const subCheck = checkUserSubscription(user.id);
+    const subCheck = await checkUserSubscription(user.id, (user as any).legacy_id, user.role);
     if (!subCheck.allowed) continue;
 
     // Check WhatsApp settings
-    const ws = db.whatsapp_settings.find((w) => w.user_id === user.id);
-    if (!ws || !ws.auto_billing_enabled || !ws.api_url || !ws.instance_name || !ws.api_key) {
+    const ws = db.whatsapp_settings.find((w) => isUserMatch(w.user_id, user));
+    if (!ws || !ws.auto_billing_enabled) {
       continue;
     }
 
+    // Instance name derived exclusively from reseller identity; credentials strictly from central config
+    const instanceName = getResellerInstanceName(user.id);
+    const targetUrl = evolution.cleanUrl;
+    const targetKey = evolution.apiKey;
+
     // Check Billing Settings
-    let bs = db.billing_settings.find((b) => b.user_id === user.id);
+    let bs = db.billing_settings.find((b) => isUserMatch(b.user_id, user));
     if (!bs) {
       bs = {
         id: 'bs-' + user.id,
@@ -773,7 +1033,7 @@ async function runBillingCycleCheck(): Promise<{ processed: number; sent: number
     const safeBs = bs;
 
     // Get user templates
-    const templates = db.message_templates.filter((t) => t.user_id === user.id);
+    const templates = db.message_templates.filter((t) => isUserMatch(t.user_id, user));
     const tplBefore = templates.find((t) => t.type === 'day_before')?.template_text ||
       'Olá, {nome}! Tudo bem? 😊 Passando para lembrar que seu plano {plano} vence amanhã, dia {vencimento}. Valor: {valor}. Qualquer dúvida, estou à disposição!';
     const tplDay = templates.find((t) => t.type === 'day_of')?.template_text ||
@@ -781,18 +1041,25 @@ async function runBillingCycleCheck(): Promise<{ processed: number; sent: number
     const tplAfter = templates.find((t) => t.type === 'day_after')?.template_text ||
       'Olá, {nome}! Identificamos que o vencimento do seu plano {plano} foi ontem, dia {vencimento}. Caso já tenha realizado o pagamento, por favor, desconsidere esta mensagem. Se precisar de ajuda, estamos à disposição.';
 
-    // Get user customers
-    const userCustomers = db.customers.filter((c) => c.user_id === user.id);
+    // Get user customers and plans strictly isolated from Supabase
+    const userCustomers = isSupabaseServerConfigured && supabaseAdmin
+      ? await getSupabaseCustomers(user.id).catch(() => [])
+      : db.customers.filter((c) => isUserMatch(c.user_id, user));
+
+    const userPlans = isSupabaseServerConfigured && supabaseAdmin
+      ? await getSupabasePlans(user.id).catch(() => [])
+      : db.plans.filter((p) => isUserMatch(p.user_id, user));
 
     for (const cust of userCustomers) {
       if (!cust.whatsapp) continue;
-      const normalizedPhone = normalizeWhatsApp(cust.whatsapp);
-      if (normalizedPhone.length < 10) continue;
+      const phoneValidation = validateWhatsAppNumber(cust.whatsapp);
+      if (!phoneValidation.valid) continue;
+      const normalizedPhone = phoneValidation.normalized;
 
       const diff = getDaysDiff(cust.expiration_date);
-      const plan = db.plans.find((p) => p.id === cust.plan_id);
-      const planName = plan ? plan.name : 'Plano IPTV';
-      const planPrice = plan ? `R$ ${plan.price.toFixed(2).replace('.', ',')}` : 'R$ 0,00';
+      const plan = userPlans.find((p) => p.id === cust.plan_id);
+      const planName = plan ? plan.name : ((cust as any).plan_name || 'Plano IPTV');
+      const planPrice = plan ? `R$ ${plan.price.toFixed(2).replace('.', ',')}` : ((cust as any).plan_price ? `R$ ${(cust as any).plan_price.toFixed(2).replace('.', ',')}` : 'R$ 0,00');
       const formattedDate = formatDateBR(cust.expiration_date);
 
       // Determine which slot triggers
@@ -878,32 +1145,35 @@ async function runBillingCycleCheck(): Promise<{ processed: number; sent: number
 
         // Execute Evolution API Call
         try {
-          const cleanApiUrl = ws.api_url.replace(/\/+$/, '');
-          const endpoint = `${cleanApiUrl}/message/sendText/${encodeURIComponent(ws.instance_name)}`;
+          const cleanApiUrl = targetUrl.replace(/\/+$/, '');
+          const endpoint = `${cleanApiUrl}/message/sendText/${encodeURIComponent(instanceName)}`;
 
           const apiResponse = await fetch(endpoint, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              apikey: ws.api_key,
+              apikey: targetKey,
             },
             body: JSON.stringify({
               number: normalizedPhone,
               text: finalMessage,
               delay: 1200,
             }),
+            signal: AbortSignal.timeout(10000),
           });
 
           const resData = await apiResponse.json().catch(() => ({}));
+          const sanitized = sanitizeEvolutionResponse(resData);
 
           if (apiResponse.ok) {
             logEntry.status = 'sent';
-            logEntry.response_payload = JSON.stringify(resData);
+            logEntry.response_payload = JSON.stringify(sanitized);
             sent++;
           } else {
             logEntry.status = 'failed';
-            logEntry.error_details = `HTTP ${apiResponse.status}: ${JSON.stringify(resData)}`;
+            logEntry.error_details = `HTTP ${apiResponse.status}: ${resData?.message || resData?.error || 'Erro no envio'}`;
             failed++;
+            checkAndHandleInstanceDisconnect(user.id, apiResponse.status, resData);
           }
         } catch (err: any) {
           logEntry.status = 'failed';
@@ -1075,10 +1345,10 @@ async function startServer() {
     });
   });
 
-  app.get('/api/auth/me', authenticateUser, (req, res) => {
+  app.get('/api/auth/me', authenticateUser, async (req, res) => {
     const user = (req as any).user;
-    const subCheck = checkUserSubscription(user.id, user.legacy_id, user.role);
-    const sub = db.subscriptions.find((s) => s.user_id === user.id || (user.legacy_id && s.user_id === user.legacy_id));
+    const subCheck = await checkUserSubscription(user.id, user.legacy_id, user.role);
+    const sub = subCheck.subscription || db.subscriptions.find((s) => s.user_id === user.id || (user.legacy_id && s.user_id === user.legacy_id));
 
     return res.json({
       user: {
@@ -1096,296 +1366,441 @@ async function startServer() {
   });
 
   // 2. DASHBOARD METRICS
-  app.get('/api/dashboard/metrics', authenticateUser, (req, res) => {
+  app.get('/api/dashboard/metrics', authenticateUser, async (req, res) => {
     const user = (req as any).user;
-    refreshCustomerStatuses(user.id);
+    if (!isSupabaseServerConfigured || !supabaseAdmin) {
+      return res.status(503).json({
+        error: 'DATABASE_UNAVAILABLE',
+        message: 'Serviço de banco de dados Supabase indisponível no momento.',
+      });
+    }
 
-    const userCustomers = db.customers.filter((c) => isUserMatch(c.user_id, user));
-    const userPlans = db.plans.filter((p) => isUserMatch(p.user_id, user));
-    const userApps = db.applications.filter((a) => isUserMatch(a.user_id, user));
-    const ws = db.whatsapp_settings.find((w) => isUserMatch(w.user_id, user));
-    const subCheck = checkUserSubscription(user.id, user.legacy_id, user.role);
+    try {
+      const metrics = await getSupabaseDashboardMetrics(user.id, user.role === 'admin');
+      const ws = db.whatsapp_settings.find((w) => isUserMatch(w.user_id, user));
+      const subCheck = await checkUserSubscription(user.id, user.legacy_id, user.role);
 
-    const activeCustomers = userCustomers.filter((c) => c.status === 'active').length;
-    const expiringSoonCustomers = userCustomers.filter((c) => c.status === 'expiring_soon').length;
-    const expiredCustomers = userCustomers.filter((c) => c.status === 'expired').length;
-
-    // Estimate monthly revenue
-    let monthlyRevenueEstimate = 0;
-    userCustomers.forEach((cust) => {
-      const plan = userPlans.find((p) => p.id === cust.plan_id);
-      if (plan && plan.price) {
-        monthlyRevenueEstimate += plan.price;
-      }
-    });
-
-    return res.json({
-      totalCustomers: userCustomers.length,
-      activeCustomers,
-      expiringSoonCustomers,
-      expiredCustomers,
-      totalPlans: userPlans.length,
-      totalApplications: userApps.length,
-      whatsAppConnected: !!ws?.is_connected,
-      autoBillingEnabled: !!ws?.auto_billing_enabled,
-      trialDaysLeft: subCheck.daysLeft,
-      trialHoursLeft: subCheck.hoursLeft,
-      subscriptionStatus: subCheck.status,
-      monthlyRevenueEstimate,
-    });
+      return res.json({
+        totalCustomers: metrics.totalCustomers,
+        activeCustomers: metrics.activeCustomers,
+        expiringSoonCustomers: metrics.expiringSoonCustomers,
+        expiredCustomers: metrics.expiredCustomers,
+        totalPlans: metrics.totalPlans,
+        totalApplications: metrics.totalApplications,
+        whatsAppConnected: !!ws?.is_connected,
+        autoBillingEnabled: !!ws?.auto_billing_enabled,
+        trialDaysLeft: subCheck.daysLeft,
+        trialHoursLeft: subCheck.hoursLeft,
+        subscriptionStatus: subCheck.status,
+        monthlyRevenueEstimate: metrics.monthlyRevenueEstimate,
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao carregar métricas no banco de dados: ${err.message || String(err)}`,
+      });
+    }
   });
 
   // 3. CUSTOMERS CRUD
-  app.get('/api/customers', authenticateUser, (req, res) => {
+  app.get('/api/customers', authenticateUser, async (req, res) => {
     const user = (req as any).user;
-    refreshCustomerStatuses(user.id);
-
-    const userCustomers = db.customers
-      .filter((c) => isUserMatch(c.user_id, user))
-      .map((c) => {
-        const plan = db.plans.find((p) => p.id === c.plan_id);
-        const appItem = db.applications.find((a) => a.id === c.application_id);
-        return {
-          ...c,
-          plan_name: plan?.name,
-          plan_price: plan?.price,
-          application_name: appItem?.name,
-        };
+    if (!isSupabaseServerConfigured || !supabaseAdmin) {
+      return res.status(503).json({
+        error: 'DATABASE_UNAVAILABLE',
+        message: 'Serviço de banco de dados Supabase indisponível no momento.',
       });
+    }
 
-    return res.json(userCustomers);
+    try {
+      const customers = await getSupabaseCustomers(user.id, user.role === 'admin');
+      return res.json(customers);
+    } catch (err: any) {
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao consultar clientes no banco de dados: ${err.message || String(err)}`,
+      });
+    }
   });
 
-  app.post('/api/customers', authenticateUser, requireActiveSubscription, (req, res) => {
+  app.post('/api/customers', authenticateUser, requireActiveSubscription, async (req, res) => {
     const user = (req as any).user;
+    if (!isSupabaseServerConfigured || !supabaseAdmin) {
+      return res.status(503).json({
+        error: 'DATABASE_UNAVAILABLE',
+        message: 'Serviço de banco de dados Supabase indisponível no momento. A operação não foi salva.',
+      });
+    }
+
     const { name, email, whatsapp, notes, plan_id, application_id, start_date, expiration_date } = req.body;
 
     if (!name || !whatsapp || !expiration_date) {
       return res.status(400).json({ error: 'Nome, WhatsApp e Data de Vencimento são obrigatórios' });
     }
 
-    const now = new Date();
-    const newCust: {
-      id: string;
-      user_id: string;
-      name: string;
-      email?: string;
-      whatsapp: string;
-      notes?: string;
-      plan_id?: string;
-      application_id?: string;
-      start_date: string;
-      expiration_date: string;
-      status: 'active' | 'expiring_soon' | 'expired';
-      created_at: string;
-      updated_at: string;
-    } = {
-      id: 'cust-' + Date.now(),
-      user_id: user.id,
-      name: name.trim(),
-      email: email ? email.trim() : '',
-      whatsapp: normalizeWhatsApp(whatsapp),
-      notes: notes ? notes.trim() : '',
-      plan_id: plan_id || undefined,
-      application_id: application_id || undefined,
-      start_date: start_date || now.toISOString().slice(0, 10),
-      expiration_date,
-      status: 'active',
-      created_at: now.toISOString(),
-      updated_at: now.toISOString(),
-    };
+    const phoneValidation = validateWhatsAppNumber(whatsapp);
+    if (!phoneValidation.valid) {
+      return res.status(400).json({ error: phoneValidation.error || 'Número de WhatsApp inválido.' });
+    }
 
-    const diff = getDaysDiff(expiration_date);
-    if (diff < 0) newCust.status = 'expired';
-    else if (diff <= 2) newCust.status = 'expiring_soon';
-
-    db.customers.push(newCust);
-    saveDB(db);
-    return res.status(201).json(newCust);
+    try {
+      const newCust = await createSupabaseCustomer(user.id, {
+        name,
+        email,
+        whatsapp: phoneValidation.normalized,
+        notes,
+        plan_id,
+        application_id,
+        start_date,
+        expiration_date,
+      });
+      return res.status(201).json(newCust);
+    } catch (err: any) {
+      if (err.message?.includes('PROFILE_NOT_FOUND')) {
+        return res.status(409).json({
+          error: 'PROFILE_NOT_FOUND',
+          message: 'Perfil do revendedor não encontrado na tabela public.profiles do Supabase. Cadastre ou sincronize o perfil antes de criar clientes.',
+        });
+      }
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao salvar cliente no banco de dados: ${err.message || String(err)}`,
+      });
+    }
   });
 
-  app.put('/api/customers/:id', authenticateUser, requireActiveSubscription, (req, res) => {
+  app.put('/api/customers/:id', authenticateUser, requireActiveSubscription, async (req, res) => {
     const user = (req as any).user;
-    const cust = db.customers.find((c) => c.id === req.params.id && isUserMatch(c.user_id, user));
-    if (!cust) return res.status(404).json({ error: 'Cliente não encontrado' });
+    if (!isSupabaseServerConfigured || !supabaseAdmin) {
+      return res.status(503).json({
+        error: 'DATABASE_UNAVAILABLE',
+        message: 'Serviço de banco de dados Supabase indisponível no momento. A alteração não foi salva.',
+      });
+    }
 
     const { name, email, whatsapp, notes, plan_id, application_id, start_date, expiration_date, status } = req.body;
 
-    if (name) cust.name = name.trim();
-    if (email !== undefined) cust.email = email.trim();
-    if (whatsapp) cust.whatsapp = normalizeWhatsApp(whatsapp);
-    if (notes !== undefined) cust.notes = notes.trim();
-    if (plan_id !== undefined) cust.plan_id = plan_id || undefined;
-    if (application_id !== undefined) cust.application_id = application_id || undefined;
-    if (start_date) cust.start_date = start_date;
-    if (expiration_date) {
-      cust.expiration_date = expiration_date;
-      const diff = getDaysDiff(expiration_date);
-      if (diff < 0) cust.status = 'expired';
-      else if (diff <= 2) cust.status = 'expiring_soon';
-      else cust.status = 'active';
-    } else if (status) {
-      cust.status = status;
+    let normalizedPhone: string | undefined = undefined;
+    if (whatsapp) {
+      const phoneValidation = validateWhatsAppNumber(whatsapp);
+      if (!phoneValidation.valid) {
+        return res.status(400).json({ error: phoneValidation.error || 'Número de WhatsApp inválido.' });
+      }
+      normalizedPhone = phoneValidation.normalized;
     }
 
-    cust.updated_at = new Date().toISOString();
-    saveDB(db);
-    return res.json(cust);
+    try {
+      const updatedCust = await updateSupabaseCustomer(
+        req.params.id,
+        user.id,
+        {
+          name,
+          email,
+          whatsapp: normalizedPhone,
+          notes,
+          plan_id,
+          application_id,
+          start_date,
+          expiration_date,
+          status,
+        },
+        user.role === 'admin'
+      );
+      return res.json(updatedCust);
+    } catch (err: any) {
+      if (err.message?.includes('ID_INVALID') || err.message?.includes('JSON object requested')) {
+        return res.status(404).json({ error: 'Cliente não encontrado' });
+      }
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao atualizar cliente no banco de dados: ${err.message || String(err)}`,
+      });
+    }
   });
 
-  app.delete('/api/customers/:id', authenticateUser, requireActiveSubscription, (req, res) => {
+  app.delete('/api/customers/:id', authenticateUser, requireActiveSubscription, async (req, res) => {
     const user = (req as any).user;
-    const index = db.customers.findIndex((c) => c.id === req.params.id && isUserMatch(c.user_id, user));
-    if (index === -1) return res.status(404).json({ error: 'Cliente não encontrado' });
+    if (!isSupabaseServerConfigured || !supabaseAdmin) {
+      return res.status(503).json({
+        error: 'DATABASE_UNAVAILABLE',
+        message: 'Serviço de banco de dados Supabase indisponível no momento. A exclusão não foi concluída.',
+      });
+    }
 
-    db.customers.splice(index, 1);
-    saveDB(db);
-    return res.json({ success: true, message: 'Cliente excluído com sucesso' });
+    try {
+      await deleteSupabaseCustomer(req.params.id, user.id, user.role === 'admin');
+      return res.json({ success: true, message: 'Cliente excluído com sucesso' });
+    } catch (err: any) {
+      if (err.message?.includes('ID_INVALID')) {
+        return res.status(404).json({ error: 'Cliente não encontrado' });
+      }
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao excluir cliente no banco de dados: ${err.message || String(err)}`,
+      });
+    }
   });
 
   // Customer Renewal endpoint
-  app.post('/api/customers/:id/renew', authenticateUser, requireActiveSubscription, (req, res) => {
+  app.post('/api/customers/:id/renew', authenticateUser, requireActiveSubscription, async (req, res) => {
     const user = (req as any).user;
-    const cust = db.customers.find((c) => c.id === req.params.id && isUserMatch(c.user_id, user));
-    if (!cust) return res.status(404).json({ error: 'Cliente não encontrado' });
+    if (!isSupabaseServerConfigured || !supabaseAdmin) {
+      return res.status(503).json({
+        error: 'DATABASE_UNAVAILABLE',
+        message: 'Serviço de banco de dados Supabase indisponível no momento. A renovação não foi concluída.',
+      });
+    }
 
-    const plan = db.plans.find((p) => p.id === cust.plan_id);
-    const durationDays = plan ? plan.duration_days : 30;
-
-    // Calculate new expiration date: from current expiration or from today if already expired
-    const now = new Date();
-    const currentExp = new Date(cust.expiration_date + 'T00:00:00');
-    const baseDate = currentExp.getTime() > now.getTime() ? currentExp : now;
-
-    const newExp = new Date(baseDate.getTime() + durationDays * 24 * 60 * 60 * 1000);
-    cust.expiration_date = newExp.toISOString().slice(0, 10);
-    cust.status = 'active';
-    cust.updated_at = now.toISOString();
-
-    saveDB(db);
-    return res.json({ success: true, customer: cust, message: `Plano renovado por ${durationDays} dias até ${formatDateBR(cust.expiration_date)}!` });
+    try {
+      const result = await renewSupabaseCustomer(req.params.id, user.id, user.role === 'admin');
+      return res.json({
+        success: true,
+        customer: result.customer,
+        message: `Plano renovado por ${result.durationDays} dias até ${formatDateBR(result.customer.expiration_date)}!`,
+      });
+    } catch (err: any) {
+      if (err.message?.includes('não encontrado') || err.message?.includes('ID_INVALID')) {
+        return res.status(404).json({ error: 'Cliente não encontrado' });
+      }
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao renovar cliente no banco de dados: ${err.message || String(err)}`,
+      });
+    }
   });
 
   // 4. PLANS CRUD
-  app.get('/api/plans', authenticateUser, (req, res) => {
+  app.get('/api/plans', authenticateUser, async (req, res) => {
     const user = (req as any).user;
-    const userPlans = db.plans.filter((p) => isUserMatch(p.user_id, user));
-    return res.json(userPlans);
+    if (!isSupabaseServerConfigured || !supabaseAdmin) {
+      return res.status(503).json({
+        error: 'DATABASE_UNAVAILABLE',
+        message: 'Serviço de banco de dados Supabase indisponível no momento.',
+      });
+    }
+
+    try {
+      const plans = await getSupabasePlans(user.id, user.role === 'admin');
+      return res.json(plans);
+    } catch (err: any) {
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao consultar planos no banco de dados: ${err.message || String(err)}`,
+      });
+    }
   });
 
-  app.post('/api/plans', authenticateUser, requireActiveSubscription, (req, res) => {
+  app.post('/api/plans', authenticateUser, requireActiveSubscription, async (req, res) => {
     const user = (req as any).user;
+    if (!isSupabaseServerConfigured || !supabaseAdmin) {
+      return res.status(503).json({
+        error: 'DATABASE_UNAVAILABLE',
+        message: 'Serviço de banco de dados Supabase indisponível no momento. O plano não foi salvo.',
+      });
+    }
+
     const { name, price, duration_days, description, status, panel, server_dns } = req.body;
     if (!name || price === undefined) {
       return res.status(400).json({ error: 'Nome e valor do plano são obrigatórios' });
     }
 
-    const planStatus: 'active' | 'inactive' = status === 'inactive' ? 'inactive' : 'active';
-    const cleanDnsList = Array.isArray(server_dns)
-      ? server_dns.map((d: any) => String(d).trim()).filter((d: string) => d.length > 0)
-      : [];
-
-    const newPlan = {
-      id: 'plan-' + Date.now(),
-      user_id: user.id,
-      name: name.trim(),
-      price: Number(price) || 0,
-      duration_days: parseInt(duration_days, 10) || 30,
-      description: description ? description.trim() : '',
-      panel: panel ? String(panel).trim() : '',
-      server_dns: cleanDnsList,
-      status: planStatus,
-      created_at: new Date().toISOString(),
-    };
-
-    db.plans.push(newPlan);
-    saveDB(db);
-    return res.status(201).json(newPlan);
+    try {
+      const newPlan = await createSupabasePlan(user.id, {
+        name,
+        price,
+        duration_days,
+        description,
+        panel,
+        server_dns,
+        status,
+      });
+      return res.status(201).json(newPlan);
+    } catch (err: any) {
+      if (err.message?.includes('PROFILE_NOT_FOUND')) {
+        return res.status(409).json({
+          error: 'PROFILE_NOT_FOUND',
+          message: 'Perfil do revendedor não encontrado na tabela public.profiles do Supabase. Cadastre ou sincronize o perfil antes de criar planos.',
+        });
+      }
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao criar plano no banco de dados: ${err.message || String(err)}`,
+      });
+    }
   });
 
-  app.put('/api/plans/:id', authenticateUser, requireActiveSubscription, (req, res) => {
+  app.put('/api/plans/:id', authenticateUser, requireActiveSubscription, async (req, res) => {
     const user = (req as any).user;
-    const plan = db.plans.find((p) => p.id === req.params.id && isUserMatch(p.user_id, user));
-    if (!plan) return res.status(404).json({ error: 'Plano não encontrado' });
+    if (!isSupabaseServerConfigured || !supabaseAdmin) {
+      return res.status(503).json({
+        error: 'DATABASE_UNAVAILABLE',
+        message: 'Serviço de banco de dados Supabase indisponível no momento. A alteração não foi salva.',
+      });
+    }
 
     const { name, price, duration_days, description, status, panel, server_dns } = req.body;
-    if (name) plan.name = name.trim();
-    if (price !== undefined) plan.price = Number(price);
-    if (duration_days !== undefined) plan.duration_days = parseInt(duration_days, 10);
-    if (description !== undefined) plan.description = description.trim();
-    if (panel !== undefined) plan.panel = String(panel).trim();
-    if (server_dns !== undefined) {
-      plan.server_dns = Array.isArray(server_dns)
-        ? server_dns.map((d: any) => String(d).trim()).filter((d: string) => d.length > 0)
-        : [];
-    }
-    if (status !== undefined) plan.status = status;
 
-    saveDB(db);
-    return res.json(plan);
+    try {
+      const updatedPlan = await updateSupabasePlan(
+        req.params.id,
+        user.id,
+        {
+          name,
+          price,
+          duration_days,
+          description,
+          panel,
+          server_dns,
+          status,
+        },
+        user.role === 'admin'
+      );
+      return res.json(updatedPlan);
+    } catch (err: any) {
+      if (err.message?.includes('ID_INVALID') || err.message?.includes('JSON object requested')) {
+        return res.status(404).json({ error: 'Plano não encontrado' });
+      }
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao atualizar plano no banco de dados: ${err.message || String(err)}`,
+      });
+    }
   });
 
-  app.delete('/api/plans/:id', authenticateUser, requireActiveSubscription, (req, res) => {
+  app.delete('/api/plans/:id', authenticateUser, requireActiveSubscription, async (req, res) => {
     const user = (req as any).user;
-    const index = db.plans.findIndex((p) => p.id === req.params.id && isUserMatch(p.user_id, user));
-    if (index === -1) return res.status(404).json({ error: 'Plano não encontrado' });
+    if (!isSupabaseServerConfigured || !supabaseAdmin) {
+      return res.status(503).json({
+        error: 'DATABASE_UNAVAILABLE',
+        message: 'Serviço de banco de dados Supabase indisponível no momento. A exclusão não foi concluída.',
+      });
+    }
 
-    db.plans.splice(index, 1);
-    saveDB(db);
-    return res.json({ success: true, message: 'Plano excluído com sucesso' });
+    try {
+      await deleteSupabasePlan(req.params.id, user.id, user.role === 'admin');
+      return res.json({ success: true, message: 'Plano excluído com sucesso' });
+    } catch (err: any) {
+      if (err.message?.includes('ID_INVALID')) {
+        return res.status(404).json({ error: 'Plano não encontrado' });
+      }
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao excluir plano no banco de dados: ${err.message || String(err)}`,
+      });
+    }
   });
 
   // 5. APPLICATIONS CRUD
-  app.get('/api/applications', authenticateUser, (req, res) => {
+  app.get('/api/applications', authenticateUser, async (req, res) => {
     const user = (req as any).user;
-    const userApps = db.applications.filter((a) => isUserMatch(a.user_id, user));
-    return res.json(userApps);
+    if (!isSupabaseServerConfigured || !supabaseAdmin) {
+      return res.status(503).json({
+        error: 'DATABASE_UNAVAILABLE',
+        message: 'Serviço de banco de dados Supabase indisponível no momento.',
+      });
+    }
+
+    try {
+      const apps = await getSupabaseApplications(user.id, user.role === 'admin');
+      return res.json(apps);
+    } catch (err: any) {
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao consultar aplicativos no banco de dados: ${err.message || String(err)}`,
+      });
+    }
   });
 
-  app.post('/api/applications', authenticateUser, requireActiveSubscription, (req, res) => {
+  app.post('/api/applications', authenticateUser, requireActiveSubscription, async (req, res) => {
     const user = (req as any).user;
+    if (!isSupabaseServerConfigured || !supabaseAdmin) {
+      return res.status(503).json({
+        error: 'DATABASE_UNAVAILABLE',
+        message: 'Serviço de banco de dados Supabase indisponível no momento. O aplicativo não foi salvo.',
+      });
+    }
+
     const { name, description, notes, status } = req.body;
     if (!name) return res.status(400).json({ error: 'Nome do aplicativo é obrigatório' });
 
-    const appStatus: 'active' | 'inactive' = status === 'inactive' ? 'inactive' : 'active';
-    const newApp = {
-      id: 'app-' + Date.now(),
-      user_id: user.id,
-      name: name.trim(),
-      description: description ? description.trim() : '',
-      notes: notes ? notes.trim() : '',
-      status: appStatus,
-      created_at: new Date().toISOString(),
-    };
-
-    db.applications.push(newApp);
-    saveDB(db);
-    return res.status(201).json(newApp);
+    try {
+      const newApp = await createSupabaseApplication(user.id, {
+        name,
+        description,
+        notes,
+        status,
+      });
+      return res.status(201).json(newApp);
+    } catch (err: any) {
+      if (err.message?.includes('PROFILE_NOT_FOUND')) {
+        return res.status(409).json({
+          error: 'PROFILE_NOT_FOUND',
+          message: 'Perfil do revendedor não encontrado na tabela public.profiles do Supabase. Cadastre ou sincronize o perfil antes de criar aplicativos.',
+        });
+      }
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao criar aplicativo no banco de dados: ${err.message || String(err)}`,
+      });
+    }
   });
 
-  app.put('/api/applications/:id', authenticateUser, requireActiveSubscription, (req, res) => {
+  app.put('/api/applications/:id', authenticateUser, requireActiveSubscription, async (req, res) => {
     const user = (req as any).user;
-    const appItem = db.applications.find((a) => a.id === req.params.id && isUserMatch(a.user_id, user));
-    if (!appItem) return res.status(404).json({ error: 'Aplicativo não encontrado' });
+    if (!isSupabaseServerConfigured || !supabaseAdmin) {
+      return res.status(503).json({
+        error: 'DATABASE_UNAVAILABLE',
+        message: 'Serviço de banco de dados Supabase indisponível no momento. A alteração não foi salva.',
+      });
+    }
 
     const { name, description, notes, status } = req.body;
-    if (name) appItem.name = name.trim();
-    if (description !== undefined) appItem.description = description.trim();
-    if (notes !== undefined) appItem.notes = notes.trim();
-    if (status !== undefined) appItem.status = status;
 
-    saveDB(db);
-    return res.json(appItem);
+    try {
+      const updatedApp = await updateSupabaseApplication(
+        req.params.id,
+        user.id,
+        {
+          name,
+          description,
+          notes,
+          status,
+        },
+        user.role === 'admin'
+      );
+      return res.json(updatedApp);
+    } catch (err: any) {
+      if (err.message?.includes('ID_INVALID') || err.message?.includes('JSON object requested')) {
+        return res.status(404).json({ error: 'Aplicativo não encontrado' });
+      }
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao atualizar aplicativo no banco de dados: ${err.message || String(err)}`,
+      });
+    }
   });
 
-  app.delete('/api/applications/:id', authenticateUser, requireActiveSubscription, (req, res) => {
+  app.delete('/api/applications/:id', authenticateUser, requireActiveSubscription, async (req, res) => {
     const user = (req as any).user;
-    const index = db.applications.findIndex((a) => a.id === req.params.id && isUserMatch(a.user_id, user));
-    if (index === -1) return res.status(404).json({ error: 'Aplicativo não encontrado' });
+    if (!isSupabaseServerConfigured || !supabaseAdmin) {
+      return res.status(503).json({
+        error: 'DATABASE_UNAVAILABLE',
+        message: 'Serviço de banco de dados Supabase indisponível no momento. A exclusão não foi concluída.',
+      });
+    }
 
-    db.applications.splice(index, 1);
-    saveDB(db);
-    return res.json({ success: true, message: 'Aplicativo excluído com sucesso' });
+    try {
+      await deleteSupabaseApplication(req.params.id, user.id, user.role === 'admin');
+      return res.json({ success: true, message: 'Aplicativo excluído com sucesso' });
+    } catch (err: any) {
+      if (err.message?.includes('ID_INVALID')) {
+        return res.status(404).json({ error: 'Aplicativo não encontrado' });
+      }
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao excluir aplicativo no banco de dados: ${err.message || String(err)}`,
+      });
+    }
   });
 
   // 6. WHATSAPP & EVOLUTION API SETTINGS & INSTANCES
@@ -1829,41 +2244,48 @@ async function startServer() {
   });
 
   // Send Test Message
-  app.post('/api/whatsapp/send-test', authenticateUser, async (req, res) => {
+  app.post('/api/whatsapp/send-test', authenticateUser, requireActiveSubscription, async (req, res) => {
     const user = (req as any).user;
     const { test_number, message } = req.body;
 
-    if (!test_number) {
-      return res.status(400).json({ error: 'Informe o número de WhatsApp com DDD para o teste' });
+    const phoneValidation = validateWhatsAppNumber(test_number);
+    if (!phoneValidation.valid) {
+      return res.status(400).json({ error: phoneValidation.error });
     }
 
     const evolution = getActiveEvolutionConfig();
-    const ws = db.whatsapp_settings.find((w) => isUserMatch(w.user_id, user));
-    const targetUrl = evolution.cleanUrl || ws?.api_url;
-    const targetKey = evolution.apiKey || ws?.api_key;
-    const targetInstance = ws?.instance_name || getResellerInstanceName(user.id);
-
-    if (!targetUrl || !targetKey || !targetInstance) {
+    if (!evolution.isConfigured) {
       return res.status(400).json({
-        error: 'A Evolution API não está configurada ou a instância do WhatsApp não foi inicializada.',
+        error: 'A Evolution API não está configurada centralmente pelo Administrador Master no painel.',
       });
     }
 
-    const formattedNumber = normalizeWhatsApp(test_number);
+    // Instance derived exclusively from authenticated user id
+    const targetInstance = getResellerInstanceName(user.id);
+
+    // Anti-duplication lock: check atomic memory lock and recent logs
+    const lockKey = `test:${user.id}:${phoneValidation.normalized}`;
+    if (!acquireSendLock(lockKey, 15000) || checkRecentDuplicateSend(user.id, phoneValidation.normalized, undefined, 15)) {
+      return res.status(429).json({
+        error: 'DUPLICATE_SEND_BLOCKED',
+        message: 'Envio duplicado bloqueado: uma mensagem para este número já foi disparada recentemente. Aguarde 15 segundos.',
+      });
+    }
+
     const testText = message || 'Olá! Esta é uma mensagem de teste enviada com sucesso pelo Gestor FLIX via WhatsApp! 🚀';
 
     try {
-      const cleanApiUrl = targetUrl.replace(/\/+$/, '');
+      const cleanApiUrl = evolution.cleanUrl.replace(/\/+$/, '');
       const endpoint = `${cleanApiUrl}/message/sendText/${encodeURIComponent(targetInstance)}`;
 
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          apikey: targetKey,
+          apikey: evolution.apiKey,
         },
         body: JSON.stringify({
-          number: formattedNumber,
+          number: phoneValidation.normalized,
           text: testText,
           delay: 1000,
         }),
@@ -1871,30 +2293,35 @@ async function startServer() {
       });
 
       const data = await response.json().catch(() => ({}));
+      const sanitized = sanitizeEvolutionResponse(data);
 
       if (response.ok) {
-        // Record test log
         db.message_logs.unshift({
-          id: 'log-test-' + Date.now(),
+          id: 'log-test-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
           user_id: user.id,
           customer_id: 'test',
           customer_name: 'Teste de Instância',
-          whatsapp: formattedNumber,
+          whatsapp: phoneValidation.normalized,
           message_type: 'manual',
           cycle_date: new Date().toISOString().slice(0, 10),
           scheduled_for: 'Imediato',
           attempted_at: new Date().toISOString(),
           status: 'sent',
-          response_payload: JSON.stringify(data),
+          response_payload: JSON.stringify(sanitized),
           idempotency_key: `test_${user.id}_${Date.now()}`,
           created_at: new Date().toISOString(),
         });
         saveDB(db);
 
-        return res.json({ success: true, message: 'Mensagem de teste enviada com sucesso!', data });
+        return res.json({
+          success: true,
+          message: 'Mensagem aceita pela Evolution API para processamento.',
+          tracking: sanitized,
+        });
       } else {
+        checkAndHandleInstanceDisconnect(user.id, response.status, data);
         return res.status(400).json({
-          error: `Falha no envio retornado pelo WhatsApp: ${JSON.stringify(data)}`,
+          error: `Falha no envio retornado pela Evolution API: ${data?.message || data?.error || `HTTP ${response.status}`}`,
         });
       }
     } catch (err: any) {
@@ -1903,31 +2330,73 @@ async function startServer() {
   });
 
   // Send Manual Notification to Customer
-  app.post('/api/whatsapp/send-manual', authenticateUser, async (req, res) => {
+  app.post('/api/whatsapp/send-manual', authenticateUser, requireActiveSubscription, async (req, res) => {
     const user = (req as any).user;
     const { customer_id, template_type, custom_text } = req.body;
 
-    const cust = db.customers.find((c) => c.id === customer_id && c.user_id === user.id);
-    if (!cust) return res.status(404).json({ error: 'Cliente não encontrado' });
-
-    const evolution = getActiveEvolutionConfig();
-    const ws = db.whatsapp_settings.find((w) => isUserMatch(w.user_id, user));
-    const targetUrl = evolution.cleanUrl || ws?.api_url;
-    const targetKey = evolution.apiKey || ws?.api_key;
-    const targetInstance = ws?.instance_name || getResellerInstanceName(user.id);
-
-    if (!targetUrl || !targetKey || !targetInstance) {
-      return res.status(400).json({ error: 'Instância de WhatsApp não configurada' });
+    if (!customer_id) {
+      return res.status(400).json({ error: 'Identificador do cliente é obrigatório.' });
     }
 
-    const plan = db.plans.find((p) => p.id === cust.plan_id);
+    let cust: any = null;
+    let plan: any = null;
+
+    if (isSupabaseServerConfigured && supabaseAdmin) {
+      try {
+        const supabaseCustomers = await getSupabaseCustomers(user.id, user.role === 'admin');
+        cust = supabaseCustomers.find((c) => c.id === customer_id);
+        if (cust && cust.plan_id) {
+          const supabasePlans = await getSupabasePlans(user.id, user.role === 'admin');
+          plan = supabasePlans.find((p) => p.id === cust.plan_id);
+        }
+      } catch (err) {
+        console.error('Falha ao buscar cliente no Supabase para envio manual:', err);
+      }
+    }
+
+    if (!cust) {
+      cust = db.customers.find((c) => c.id === customer_id && isUserMatch(c.user_id, user));
+      if (cust && cust.plan_id) {
+        plan = db.plans.find((p) => p.id === cust.plan_id);
+      }
+    }
+
+    if (!cust) {
+      return res.status(404).json({ error: 'Cliente não encontrado ou não pertence a esta conta.' });
+    }
+
+    const phoneValidation = validateWhatsAppNumber(cust.whatsapp);
+    if (!phoneValidation.valid) {
+      return res.status(400).json({
+        error: `Número de WhatsApp do cliente é inválido (${cust.whatsapp || 'vazio'}). Atualize o cadastro do cliente antes de enviar.`,
+      });
+    }
+
+    const evolution = getActiveEvolutionConfig();
+    if (!evolution.isConfigured) {
+      return res.status(400).json({
+        error: 'A Evolution API não está configurada centralmente pelo Administrador Master no painel.',
+      });
+    }
+
+    // Instance derived exclusively from authenticated reseller
+    const targetInstance = getResellerInstanceName(user.id);
+
+    // Anti-duplication lock: debounce 15s per customer/user
+    const lockKey = `manual:${user.id}:${cust.id}`;
+    if (!acquireSendLock(lockKey, 15000) || checkRecentDuplicateSend(user.id, phoneValidation.normalized, cust.id, 15)) {
+      return res.status(429).json({
+        error: 'DUPLICATE_SEND_BLOCKED',
+        message: 'Envio duplicado bloqueado: uma mensagem para este destinatário já foi disparada recentemente. Aguarde 15 segundos antes de reenviar.',
+      });
+    }
     const planName = plan ? plan.name : 'Plano IPTV';
     const planPrice = plan ? `R$ ${plan.price.toFixed(2).replace('.', ',')}` : 'R$ 0,00';
     const formattedDate = formatDateBR(cust.expiration_date);
 
     let messageText = custom_text;
     if (!messageText) {
-      const templates = db.message_templates.filter((t) => t.user_id === user.id);
+      const templates = db.message_templates.filter((t) => isUserMatch(t.user_id, user));
       const chosenTpl = templates.find((t) => t.type === template_type) || templates[0];
       messageText = chosenTpl ? chosenTpl.template_text : 'Olá, {nome}! Seu plano {plano} vence em {vencimento}.';
     }
@@ -1939,20 +2408,18 @@ async function startServer() {
       .replace(/{vencimento}/g, formattedDate)
       .replace(/{whatsapp}/g, cust.whatsapp);
 
-    const formattedNumber = normalizeWhatsApp(cust.whatsapp);
-
     try {
-      const cleanApiUrl = targetUrl.replace(/\/+$/, '');
+      const cleanApiUrl = evolution.cleanUrl.replace(/\/+$/, '');
       const endpoint = `${cleanApiUrl}/message/sendText/${encodeURIComponent(targetInstance)}`;
 
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          apikey: targetKey,
+          apikey: evolution.apiKey,
         },
         body: JSON.stringify({
-          number: formattedNumber,
+          number: phoneValidation.normalized,
           text: messageText,
           delay: 1000,
         }),
@@ -1960,21 +2427,22 @@ async function startServer() {
       });
 
       const data = await response.json().catch(() => ({}));
+      const sanitized = sanitizeEvolutionResponse(data);
 
       const logEntry = {
-        id: 'log-manual-' + Date.now(),
+        id: 'log-manual-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
         user_id: user.id,
         customer_id: cust.id,
         customer_name: cust.name,
-        whatsapp: formattedNumber,
+        whatsapp: phoneValidation.normalized,
         message_type: 'manual' as const,
         cycle_date: cust.expiration_date,
         scheduled_for: 'Envio manual',
         attempted_at: new Date().toISOString(),
         status: (response.ok ? 'sent' : 'failed') as any,
-        response_payload: JSON.stringify(data),
-        error_details: response.ok ? undefined : JSON.stringify(data),
-        idempotency_key: `manual_${cust.id}_${Date.now()}`,
+        response_payload: JSON.stringify(sanitized),
+        error_details: response.ok ? undefined : String(data?.message || data?.error || `HTTP ${response.status}`),
+        idempotency_key: `manual_${user.id}_${cust.id}_${Date.now()}`,
         created_at: new Date().toISOString(),
       };
 
@@ -1982,9 +2450,17 @@ async function startServer() {
       saveDB(db);
 
       if (response.ok) {
-        return res.json({ success: true, message: 'Mensagem enviada com sucesso ao cliente!', data });
+        return res.json({
+          success: true,
+          message: 'Mensagem aceita pela Evolution API para processamento.',
+          tracking: sanitized,
+        });
       } else {
-        return res.status(400).json({ error: 'Erro no envio pelo WhatsApp', details: data });
+        checkAndHandleInstanceDisconnect(user.id, response.status, data);
+        return res.status(400).json({
+          error: 'Erro no envio retornado pela Evolution API',
+          details: data?.message || data?.error || `HTTP ${response.status}`,
+        });
       }
     } catch (err: any) {
       return res.status(502).json({ error: `Falha na requisição: ${err.message}` });
@@ -2096,12 +2572,16 @@ async function startServer() {
   });
 
   // Manual Trigger Billing Cycle (Worker)
-  app.post('/api/billing/trigger-cycle', authenticateUser, async (req, res) => {
+  app.post('/api/billing/trigger-cycle', authenticateUser, requireActiveSubscription, async (req, res) => {
     try {
-      const result = await runBillingCycleCheck();
+      const user = (req as any).user;
+      // Reseller can ONLY trigger billing cycle for their own customers!
+      // Admin can trigger for everyone or optionally a specific user via query param
+      const targetUserId = user.role === 'admin' ? (req.query.user_id as string | undefined) : user.id;
+      const result = await runBillingCycleCheck(targetUserId);
       return res.json({
         success: true,
-        message: `Ciclo executado: ${result.sent} enviados, ${result.failed} falhas, ${result.skipped} ignorados/já enviados hoje.`,
+        message: `Ciclo executado: ${result.sent} processados pela Evolution API, ${result.failed} falhas, ${result.skipped} ignorados/já enviados hoje.`,
         details: result,
       });
     } catch (err: any) {
@@ -2117,10 +2597,10 @@ async function startServer() {
   });
 
   // 9. SAAS SUBSCRIPTION & PAYMENT INFO
-  app.get('/api/subscription/info', authenticateUser, (req, res) => {
+  app.get('/api/subscription/info', authenticateUser, async (req, res) => {
     const user = (req as any).user;
-    const sub = db.subscriptions.find((s) => isUserMatch(s.user_id, user));
-    const subCheck = checkUserSubscription(user.id, user.legacy_id, user.role);
+    const subCheck = await checkUserSubscription(user.id, user.legacy_id, user.role);
+    const sub = subCheck.subscription || db.subscriptions.find((s) => isUserMatch(s.user_id, user));
     const saas = db.saas_settings;
 
     return res.json({
@@ -2194,12 +2674,18 @@ async function startServer() {
           .from('subscriptions')
           .select('*');
 
+        const { data: supCustomers } = await supabaseAdmin
+          .from('customers')
+          .select('id, user_id');
+
         if (profiles) {
           for (const p of profiles) {
             const emailKey = (p.email || '').toLowerCase();
             const existing = userMap.get(emailKey);
             const supSub = subs?.find((s) => s.user_id === p.id);
-            const custCount = db.customers.filter((c) => c.user_id === p.id || (existing && c.user_id === existing.id)).length;
+            const supabaseCustCount = supCustomers?.filter((c) => c.user_id === p.id).length || 0;
+            const legacyCustCount = db.customers.filter((c) => c.user_id === p.id || (existing && c.user_id === existing.id)).length;
+            const custCount = supabaseCustCount + legacyCustCount;
             const ws = db.whatsapp_settings.find((w) => w.user_id === p.id || (existing && w.user_id === existing.id));
 
             const subData = supSub
@@ -2495,6 +2981,15 @@ async function startServer() {
     return res.json({
       configured: true,
       ...result,
+    });
+  });
+
+  // ROTA DE SAÚDE SIMPLES DO PROCESSO EXPRESS (FASE 10.1)
+  app.get('/health', (_req, res) => {
+    return res.status(200).json({
+      status: 'ok',
+      uptime: Math.floor(process.uptime()),
+      timestamp: new Date().toISOString(),
     });
   });
 

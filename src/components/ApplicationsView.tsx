@@ -33,13 +33,17 @@ export const ApplicationsView: React.FC<Props> = ({ initialOpenModal, onCloseIni
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
 
+  const [error, setError] = useState<string | null>(null);
+
   const loadApps = async () => {
     try {
       setLoading(true);
+      setError(null);
       const data = await api.getApplications();
       setApps(data);
     } catch (err: any) {
       console.error('Error fetching applications:', err);
+      setError('Não foi possível carregar os aplicativos. Verifique sua conexão e tente novamente.');
     } finally {
       setLoading(false);
     }
@@ -158,6 +162,18 @@ export const ApplicationsView: React.FC<Props> = ({ initialOpenModal, onCloseIni
         <div className="p-12 text-center text-neutral-400 text-xs flex items-center justify-center gap-2">
           <RefreshCw className="w-4 h-4 animate-spin text-[#E50914]" />
           <span>Carregando aplicativos...</span>
+        </div>
+      ) : error ? (
+        <div className="p-8 text-center text-xs bg-[#181818] border border-red-500/30 rounded-xl space-y-3">
+          <AlertTriangle className="w-8 h-8 text-red-500 mx-auto" />
+          <p className="text-red-300 font-medium">{error}</p>
+          <button
+            onClick={loadApps}
+            className="px-4 py-2 text-xs font-semibold text-white bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 rounded-lg inline-flex items-center gap-1.5 transition-colors active:scale-95"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>Tentar Novamente</span>
+          </button>
         </div>
       ) : apps.length === 0 ? (
         <div className="p-12 text-center text-neutral-400 text-xs bg-[#181818] border border-[#282828] rounded-xl space-y-3">

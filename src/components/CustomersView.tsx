@@ -28,6 +28,7 @@ export const CustomersView: React.FC<Props> = ({ initialOpenModal, onCloseInitia
   const [plans, setPlans] = useState<Plan[]>([]);
   const [apps, setApps] = useState<Application[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   // Filters & Search
   const [searchTerm, setSearchTerm] = useState('');
@@ -59,6 +60,7 @@ export const CustomersView: React.FC<Props> = ({ initialOpenModal, onCloseInitia
   const loadAll = async () => {
     try {
       setLoading(true);
+      setError(null);
       const [custList, planList, appList] = await Promise.all([
         api.getCustomers(),
         api.getPlans(),
@@ -69,6 +71,7 @@ export const CustomersView: React.FC<Props> = ({ initialOpenModal, onCloseInitia
       setApps(appList);
     } catch (err: any) {
       console.error('Error fetching customers:', err);
+      setError('Não foi possível carregar os clientes. Verifique sua conexão e tente novamente.');
     } finally {
       setLoading(false);
     }
@@ -191,11 +194,11 @@ export const CustomersView: React.FC<Props> = ({ initialOpenModal, onCloseInitia
     if (!whatsappNotifyCustomer) return;
     setSendingWhatsapp(true);
     try {
-      await api.sendManualWhatsApp({
+      const res = await api.sendManualWhatsApp({
         customer_id: whatsappNotifyCustomer.id,
         template_type: selectedTemplate,
       });
-      setSuccessMsg(`Mensagem enviada com sucesso para ${whatsappNotifyCustomer.name}!`);
+      setSuccessMsg(res.message || `Mensagem aceita pela Evolution API para processamento!`);
       setWhatsappNotifyCustomer(null);
       setTimeout(() => setSuccessMsg(''), 4000);
     } catch (err: any) {
@@ -308,8 +311,20 @@ export const CustomersView: React.FC<Props> = ({ initialOpenModal, onCloseInitia
       <div className="bg-[#181818] border border-[#282828] rounded-xl overflow-hidden shadow-lg">
         {loading ? (
           <div className="p-12 text-center text-slate-400 text-xs flex items-center justify-center gap-2">
-            <RefreshCw className="w-4 h-4 animate-spin text-blue-500" />
+            <RefreshCw className="w-4 h-4 animate-spin text-[#E50914]" />
             <span>Carregando clientes...</span>
+          </div>
+        ) : error ? (
+          <div className="p-8 text-center text-xs space-y-3">
+            <AlertTriangle className="w-8 h-8 text-red-500 mx-auto" />
+            <p className="text-red-300 font-medium">{error}</p>
+            <button
+              onClick={loadAll}
+              className="px-4 py-2 text-xs font-semibold text-white bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 rounded-lg inline-flex items-center gap-1.5 transition-colors active:scale-95"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Tentar Novamente</span>
+            </button>
           </div>
         ) : filteredCustomers.length === 0 ? (
           <div className="p-12 text-center text-slate-400 text-xs space-y-3">
@@ -317,7 +332,7 @@ export const CustomersView: React.FC<Props> = ({ initialOpenModal, onCloseInitia
             <p>Nenhum cliente encontrado com os filtros selecionados.</p>
             <button
               onClick={openCreateModal}
-              className="px-4 py-2 text-xs font-medium text-blue-400 hover:text-blue-300 bg-slate-800 rounded-lg inline-flex items-center gap-1.5"
+              className="px-4 py-2 text-xs font-medium text-white hover:bg-[#b81d24] bg-[#E50914] rounded-lg inline-flex items-center gap-1.5 transition-colors"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>Cadastrar Primeiro Cliente</span>

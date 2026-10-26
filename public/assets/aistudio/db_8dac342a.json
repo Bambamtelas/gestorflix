@@ -1,0 +1,344 @@
+{
+  "users": [
+    {
+      "id": "admin-default-id",
+      "email": "chavepixedvandyemis@gmail.com",
+      "name": "Administrador Gestor IPTV",
+      "passwordHash": "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9",
+      "role": "admin",
+      "created_at": "2026-10-23T14:49:18.197Z"
+    },
+    {
+      "id": "demo-user-id",
+      "email": "revendedor@demo.com",
+      "name": "Carlos Revendedor IPTV",
+      "passwordHash": "d3ad9315b7be5dd53b31a273b3b3aba5defe700808305aa16a3062b76658a791",
+      "role": "user",
+      "created_at": "2026-10-23T14:49:18.197Z"
+    }
+  ],
+  "subscriptions": [
+    {
+      "id": "sub-admin",
+      "user_id": "admin-default-id",
+      "status": "active",
+      "trial_ends_at": "2027-10-23T14:49:18.197Z",
+      "current_period_end": "2027-10-23T14:49:18.197Z",
+      "created_at": "2026-10-23T14:49:18.197Z",
+      "updated_at": "2026-10-23T14:49:18.197Z"
+    },
+    {
+      "id": "sub-demo",
+      "user_id": "demo-user-id",
+      "status": "trial",
+      "trial_ends_at": "2026-10-29T14:49:18.197Z",
+      "current_period_end": "2026-10-29T14:49:18.197Z",
+      "created_at": "2026-10-23T14:49:18.197Z",
+      "updated_at": "2026-10-23T14:49:47.577Z"
+    },
+    {
+      "id": "sub-3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e",
+      "user_id": "3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e",
+      "status": "trial",
+      "trial_ends_at": "2026-10-27T17:49:20.858Z",
+      "current_period_end": "2026-10-27T17:49:20.858Z",
+      "created_at": "2026-10-24T17:49:20.858Z",
+      "updated_at": "2026-10-24T17:49:20.858Z"
+    },
+    {
+      "id": "sub-b3bc736d-6389-4f8e-954f-ebc585ab613e",
+      "user_id": "b3bc736d-6389-4f8e-954f-ebc585ab613e",
+      "status": "trial",
+      "trial_ends_at": "2026-10-27T20:53:18.186Z",
+      "current_period_end": "2026-10-27T20:53:18.186Z",
+      "created_at": "2026-10-24T20:53:18.186Z",
+      "updated_at": "2026-10-24T20:53:18.186Z"
+    }
+  ],
+  "plans": [
+    {
+      "id": "plan-1",
+      "user_id": "demo-user-id",
+      "name": "Plano Básico IPTV",
+      "price": 30,
+      "duration_days": 30,
+      "description": "1 tela FHD + Canais e Filmes",
+      "status": "active",
+      "created_at": "2026-10-23T14:49:18.197Z"
+    },
+    {
+      "id": "plan-2",
+      "user_id": "demo-user-id",
+      "name": "Plano Família 2 Telas",
+      "price": 45,
+      "duration_days": 30,
+      "description": "2 telas simultâneas 4K + Filmes e Séries atualizadas",
+      "status": "active",
+      "created_at": "2026-10-23T14:49:18.197Z"
+    },
+    {
+      "id": "plan-3",
+      "user_id": "demo-user-id",
+      "name": "Plano Trimestral Promo",
+      "price": 80,
+      "duration_days": 90,
+      "description": "3 meses com desconto especial",
+      "status": "active",
+      "created_at": "2026-10-23T14:49:18.197Z"
+    },
+    {
+      "id": "plan-1792864339751",
+      "user_id": "3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e",
+      "name": "Canais Liberados",
+      "price": 35,
+      "duration_days": 30,
+      "description": "",
+      "panel": "P2 imperial",
+      "server_dns": [
+        "http://hosting.com:80"
+      ],
+      "status": "active",
+      "created_at": "2026-10-24T17:52:19.751Z"
+    }
+  ],
+  "applications": [
+    {
+      "id": "app-1",
+      "user_id": "demo-user-id",
+      "name": "IBO Player Pro",
+      "description": "Aplicativo rápido e intuitivo para Smart TVs LG e Samsung",
+      "notes": "Código MAC e Device Key necessários",
+      "status": "active",
+      "created_at": "2026-10-23T14:49:18.197Z"
+    },
+    {
+      "id": "app-2",
+      "user_id": "demo-user-id",
+      "name": "Bob Player",
+      "description": "Excelente para TV Box e Android TV",
+      "notes": "",
+      "status": "active",
+      "created_at": "2026-10-23T14:49:18.197Z"
+    },
+    {
+      "id": "app-3",
+      "user_id": "demo-user-id",
+      "name": "XCIPTV Player",
+      "description": "Player clássico para smartphone e tablets Android",
+      "notes": "",
+      "status": "active",
+      "created_at": "2026-10-23T14:49:18.197Z"
+    }
+  ],
+  "customers": [
+    {
+      "id": "cust-1",
+      "user_id": "demo-user-id",
+      "name": "Marcos Silva",
+      "email": "marcos@email.com",
+      "whatsapp": "5511987654321",
+      "notes": "TV Samsung sala",
+      "plan_id": "plan-1",
+      "application_id": "app-1",
+      "start_date": "2026-10-22",
+      "expiration_date": "2026-10-24",
+      "status": "expired",
+      "created_at": "2026-10-23T14:49:18.197Z",
+      "updated_at": "2026-10-25T00:00:15.985Z"
+    },
+    {
+      "id": "cust-2",
+      "user_id": "demo-user-id",
+      "name": "Fernanda Souza",
+      "email": "fernanda@email.com",
+      "whatsapp": "5521998877665",
+      "notes": "Plano Família",
+      "plan_id": "plan-2",
+      "application_id": "app-2",
+      "start_date": "2026-09-23",
+      "expiration_date": "2026-10-23",
+      "status": "expired",
+      "created_at": "2026-10-23T14:49:18.197Z",
+      "updated_at": "2026-10-24T15:53:02.295Z"
+    },
+    {
+      "id": "cust-3",
+      "user_id": "demo-user-id",
+      "name": "Lucas Pereira",
+      "email": "",
+      "whatsapp": "5531988884433",
+      "notes": "Venceu ontem",
+      "plan_id": "plan-1",
+      "application_id": "app-1",
+      "start_date": "2026-09-22",
+      "expiration_date": "2026-10-22",
+      "status": "expired",
+      "created_at": "2026-10-23T14:49:18.197Z",
+      "updated_at": "2026-10-23T14:49:18.197Z"
+    },
+    {
+      "id": "cust-4",
+      "user_id": "demo-user-id",
+      "name": "Juliana Costa",
+      "email": "ju.costa@email.com",
+      "whatsapp": "5541977771234",
+      "notes": "Cliente fiel",
+      "plan_id": "plan-3",
+      "application_id": "app-3",
+      "start_date": "2026-10-23",
+      "expiration_date": "2026-11-02",
+      "status": "active",
+      "created_at": "2026-10-23T14:49:18.197Z",
+      "updated_at": "2026-10-23T14:49:18.197Z"
+    },
+    {
+      "id": "cust-1792864375273",
+      "user_id": "3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e",
+      "name": "Edvan",
+      "email": "",
+      "whatsapp": "5585996079396",
+      "notes": "",
+      "plan_id": "plan-1792864339751",
+      "start_date": "2026-10-24",
+      "expiration_date": "2026-10-23",
+      "status": "expired",
+      "created_at": "2026-10-24T17:52:55.273Z",
+      "updated_at": "2026-10-24T17:52:55.273Z"
+    }
+  ],
+  "whatsapp_settings": [
+    {
+      "id": "ws-demo",
+      "user_id": "demo-user-id",
+      "api_url": "",
+      "instance_name": "",
+      "api_key": "",
+      "is_connected": false,
+      "auto_billing_enabled": false,
+      "created_at": "2026-10-23T14:49:18.197Z",
+      "updated_at": "2026-10-23T14:49:18.197Z"
+    },
+    {
+      "id": "ws-admin",
+      "user_id": "admin-default-id",
+      "api_url": "",
+      "instance_name": "",
+      "api_key": "",
+      "is_connected": false,
+      "auto_billing_enabled": false,
+      "created_at": "2026-10-23T14:49:18.197Z",
+      "updated_at": "2026-10-23T14:49:18.197Z",
+      "last_checked_at": "2026-10-24T19:03:17.154Z"
+    },
+    {
+      "id": "ws-3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e",
+      "user_id": "3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e",
+      "api_url": "https://api.doratec.site",
+      "instance_name": "gestorflix_3a4a0f08_1bff_41f6_9b57_5c142a3e1f9e",
+      "api_key": "1003be981b063ae8c3146ba09557a56245312581afb4891d36c316281665eb28",
+      "is_connected": true,
+      "auto_billing_enabled": true,
+      "created_at": "2026-10-24T17:53:14.563Z",
+      "updated_at": "2026-10-24T17:57:27.668Z",
+      "last_checked_at": "2026-10-25T15:45:44.113Z"
+    }
+  ],
+  "billing_settings": [
+    {
+      "id": "bs-demo",
+      "user_id": "demo-user-id",
+      "timezone": "America/Sao_Paulo",
+      "send_day_before": true,
+      "time_day_before": "09:00",
+      "send_day_of_morning": true,
+      "time_day_of_morning": "09:00",
+      "send_day_of_night": true,
+      "time_day_of_night": "19:00",
+      "send_day_after": true,
+      "time_day_after": "10:00"
+    },
+    {
+      "id": "bs-admin",
+      "user_id": "admin-default-id",
+      "timezone": "America/Sao_Paulo",
+      "send_day_before": true,
+      "time_day_before": "09:00",
+      "send_day_of_morning": true,
+      "time_day_of_morning": "09:00",
+      "send_day_of_night": true,
+      "time_day_of_night": "19:00",
+      "send_day_after": true,
+      "time_day_after": "10:00"
+    },
+    {
+      "id": "bs-3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e",
+      "user_id": "3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e",
+      "timezone": "America/Sao_Paulo",
+      "send_day_before": true,
+      "time_day_before": "15:04",
+      "send_day_of_morning": true,
+      "time_day_of_morning": "09:00",
+      "send_day_of_night": true,
+      "time_day_of_night": "19:00",
+      "send_day_after": true,
+      "time_day_after": "10:00"
+    }
+  ],
+  "message_templates": [
+    {
+      "id": "tpl-1-demo",
+      "user_id": "demo-user-id",
+      "type": "day_before",
+      "title": "Lembrete de Vencimento (1 dia antes)",
+      "template_text": "Olá, {nome}! Tudo bem? 😊 Passando para lembrar que seu plano {plano} vence amanhã, dia {vencimento}. Valor: {valor}. Qualquer dúvida, estou à disposição!",
+      "updated_at": "2026-10-23T14:49:18.197Z"
+    },
+    {
+      "id": "tpl-2-demo",
+      "user_id": "demo-user-id",
+      "type": "day_of",
+      "title": "Lembrete no Dia do Vencimento",
+      "template_text": "Olá, {nome}! 😊 Hoje é o vencimento do seu plano {plano}. O valor é {valor}. Entre em contato para regularizar e continuar utilizando seu serviço normalmente.",
+      "updated_at": "2026-10-23T14:49:18.197Z"
+    },
+    {
+      "id": "tpl-3-demo",
+      "user_id": "demo-user-id",
+      "type": "day_after",
+      "title": "Aviso de Vencimento Atrasado (1 dia depois)",
+      "template_text": "Olá, {nome}! Identificamos que o vencimento do seu plano {plano} foi ontem, dia {vencimento}. Caso já tenha realizado o pagamento, por favor, desconsidere esta mensagem. Se precisar de ajuda, estamos à disposição.",
+      "updated_at": "2026-10-23T14:49:18.197Z"
+    },
+    {
+      "id": "tpl-day_before-3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e",
+      "user_id": "3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e",
+      "type": "day_before",
+      "title": "Lembrete de Vencimento",
+      "template_text": "teste\n{nome},\n {plano}, \n{valor},\n {vencimento}\n, {whatsapp}.",
+      "updated_at": "2026-10-24T17:58:19.699Z"
+    }
+  ],
+  "message_logs": [
+    {
+      "id": "log-test-1792865059165",
+      "user_id": "3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e",
+      "customer_id": "test",
+      "customer_name": "Teste de Instância",
+      "whatsapp": "5585996079396",
+      "message_type": "manual",
+      "cycle_date": "2026-10-24",
+      "scheduled_for": "Imediato",
+      "attempted_at": "2026-10-24T18:04:19.165Z",
+      "status": "sent",
+      "response_payload": "{\"key\":{\"remoteJid\":\"558596079396@s.whatsapp.net\",\"fromMe\":true,\"id\":\"3EB085D6BEEFE10667258F\"},\"pushName\":\"Você\",\"status\":\"PENDING\",\"message\":{\"conversation\":\"Olá! Esta é uma mensagem de teste enviada com sucesso pelo Gestor FLIX via WhatsApp! 🚀\"},\"contextInfo\":{\"mentionedJid\":[],\"groupMentions\":[],\"ephemeralSettingTimestamp\":{\"low\":1792692258,\"high\":0,\"unsigned\":false},\"disappearingMode\":{\"initiator\":0}},\"messageType\":\"conversation\",\"messageTimestamp\":1792865058,\"instanceId\":\"7e50329a-1cb1-4ec6-8e92-175dd6896cb7\",\"source\":\"web\"}",
+      "idempotency_key": "test_3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e_1792865059165",
+      "created_at": "2026-10-24T18:04:19.165Z"
+    }
+  ],
+  "saas_settings": {
+    "admin_pix_key": "chavepixedvandyemis@gmail.com",
+    "admin_pix_name": "Administração Gestor IPTV",
+    "saas_monthly_price": 99.9,
+    "instructions": "Após realizar o pagamento via PIX no valor de R$ 99,90 (valor único vitalício, sem mensalidade), envie o comprovante para ativação imediata da sua conta."
+  }
+}
