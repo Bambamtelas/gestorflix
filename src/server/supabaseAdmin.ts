@@ -1165,3 +1165,326 @@ export async function updateSupabaseSubscriptionStatus(
     .eq('id', subId);
 }
 
+// --- CONFIGURAÇÕES DO WHATSAPP (public.whatsapp_settings) ---
+
+export interface SupabaseWhatsAppSettings {
+  id: string;
+  user_id: string;
+  api_url: string;
+  instance_name: string;
+  api_key: string;
+  is_connected: boolean;
+  auto_billing_enabled: boolean;
+  last_checked_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function getSupabaseWhatsAppSettings(userId: string): Promise<SupabaseWhatsAppSettings | null> {
+  const admin = getSupabaseAdmin();
+  if (!isValidUUID(userId)) return null;
+
+  const { data, error } = await admin
+    .from('whatsapp_settings')
+    .select('id, user_id, api_url, instance_name, api_key, is_connected, auto_billing_enabled, last_checked_at, created_at, updated_at')
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  if (error || !data) return null;
+  return data as SupabaseWhatsAppSettings;
+}
+
+export async function ensureSupabaseWhatsAppSettings(userId: string): Promise<SupabaseWhatsAppSettings> {
+  const admin = getSupabaseAdmin();
+  if (!isValidUUID(userId)) {
+    throw new Error('ID_INVALID: UUID inválido para configurações do WhatsApp');
+  }
+
+  const existing = await getSupabaseWhatsAppSettings(userId);
+  if (existing) return existing;
+
+  const now = new Date().toISOString();
+  const sanitized = String(userId).toLowerCase().replace(/[^a-z0-9]/g, '_');
+  const instanceName = `gestorflix_${sanitized}`;
+
+  const newRecord = {
+    id: randomUUID(),
+    user_id: userId,
+    api_url: '',
+    instance_name: instanceName,
+    api_key: '',
+    is_connected: false,
+    auto_billing_enabled: false,
+    last_checked_at: null,
+    created_at: now,
+    updated_at: now,
+  };
+
+  const { data, error } = await admin
+    .from('whatsapp_settings')
+    .insert(newRecord)
+    .select('id, user_id, api_url, instance_name, api_key, is_connected, auto_billing_enabled, last_checked_at, created_at, updated_at')
+    .single();
+
+  if (error) {
+    const retry = await getSupabaseWhatsAppSettings(userId);
+    if (retry) return retry;
+    throw new Error(`Falha ao criar configurações do WhatsApp no Supabase: ${error.message}`);
+  }
+
+  return data as SupabaseWhatsAppSettings;
+}
+
+export async function updateSupabaseWhatsAppSettings(
+  userId: string,
+  payload: Partial<SupabaseWhatsAppSettings>
+): Promise<SupabaseWhatsAppSettings> {
+  const admin = getSupabaseAdmin();
+  if (!isValidUUID(userId)) {
+    throw new Error('ID_INVALID: UUID inválido para configurações do WhatsApp');
+  }
+
+  const existing = await ensureSupabaseWhatsAppSettings(userId);
+
+  const updateFields: Record<string, any> = {
+    updated_at: new Date().toISOString(),
+  };
+
+  if (payload.is_connected !== undefined) updateFields.is_connected = Boolean(payload.is_connected);
+  if (payload.auto_billing_enabled !== undefined) updateFields.auto_billing_enabled = Boolean(payload.auto_billing_enabled);
+  if (payload.last_checked_at !== undefined) updateFields.last_checked_at = payload.last_checked_at;
+  if (payload.instance_name !== undefined) updateFields.instance_name = payload.instance_name;
+  if (payload.api_url !== undefined) updateFields.api_url = payload.api_url;
+  if (payload.api_key !== undefined) updateFields.api_key = payload.api_key;
+
+  const { data, error } = await admin
+    .from('whatsapp_settings')
+    .update(updateFields)
+    .eq('id', existing.id)
+    .select('id, user_id, api_url, instance_name, api_key, is_connected, auto_billing_enabled, last_checked_at, created_at, updated_at')
+    .single();
+
+  if (error) {
+    throw new Error(`Falha ao atualizar configurações do WhatsApp no Supabase: ${error.message}`);
+  }
+
+  return data as SupabaseWhatsAppSettings;
+}
+
+// --- CONFIGURAÇÕES DE COBRANÇA (public.billing_settings) ---
+
+export interface SupabaseBillingSettings {
+  id: string;
+  user_id: string;
+  timezone: string;
+  send_day_before: boolean;
+  time_day_before: string;
+  send_day_of_morning: boolean;
+  time_day_of_morning: string;
+  send_day_of_night: boolean;
+  time_day_of_night: string;
+  send_day_after: boolean;
+  time_day_after: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function getSupabaseBillingSettings(userId: string): Promise<SupabaseBillingSettings | null> {
+  const admin = getSupabaseAdmin();
+  if (!isValidUUID(userId)) return null;
+
+  const { data, error } = await admin
+    .from('billing_settings')
+    .select('id, user_id, timezone, send_day_before, time_day_before, send_day_of_morning, time_day_of_morning, send_day_of_night, time_day_of_night, send_day_after, time_day_after, created_at, updated_at')
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  if (error || !data) return null;
+  return data as SupabaseBillingSettings;
+}
+
+export async function ensureSupabaseBillingSettings(userId: string): Promise<SupabaseBillingSettings> {
+  const admin = getSupabaseAdmin();
+  if (!isValidUUID(userId)) {
+    throw new Error('ID_INVALID: UUID inválido para configurações de cobrança');
+  }
+
+  const existing = await getSupabaseBillingSettings(userId);
+  if (existing) return existing;
+
+  const now = new Date().toISOString();
+  const newRecord = {
+    id: randomUUID(),
+    user_id: userId,
+    timezone: 'America/Sao_Paulo',
+    send_day_before: true,
+    time_day_before: '09:00',
+    send_day_of_morning: true,
+    time_day_of_morning: '09:00',
+    send_day_of_night: true,
+    time_day_of_night: '19:00',
+    send_day_after: true,
+    time_day_after: '10:00',
+    created_at: now,
+    updated_at: now,
+  };
+
+  const { data, error } = await admin
+    .from('billing_settings')
+    .insert(newRecord)
+    .select('id, user_id, timezone, send_day_before, time_day_before, send_day_of_morning, time_day_of_morning, send_day_of_night, time_day_of_night, send_day_after, time_day_after, created_at, updated_at')
+    .single();
+
+  if (error) {
+    const retry = await getSupabaseBillingSettings(userId);
+    if (retry) return retry;
+    throw new Error(`Falha ao criar configurações de cobrança no Supabase: ${error.message}`);
+  }
+
+  return data as SupabaseBillingSettings;
+}
+
+export async function updateSupabaseBillingSettings(
+  userId: string,
+  payload: Partial<SupabaseBillingSettings>
+): Promise<SupabaseBillingSettings> {
+  const admin = getSupabaseAdmin();
+  if (!isValidUUID(userId)) {
+    throw new Error('ID_INVALID: UUID inválido para configurações de cobrança');
+  }
+
+  const existing = await ensureSupabaseBillingSettings(userId);
+
+  const updateFields: Record<string, any> = {
+    updated_at: new Date().toISOString(),
+  };
+
+  if (payload.timezone !== undefined) updateFields.timezone = payload.timezone;
+  if (payload.send_day_before !== undefined) updateFields.send_day_before = Boolean(payload.send_day_before);
+  if (payload.time_day_before !== undefined) updateFields.time_day_before = payload.time_day_before;
+  if (payload.send_day_of_morning !== undefined) updateFields.send_day_of_morning = Boolean(payload.send_day_of_morning);
+  if (payload.time_day_of_morning !== undefined) updateFields.time_day_of_morning = payload.time_day_of_morning;
+  if (payload.send_day_of_night !== undefined) updateFields.send_day_of_night = Boolean(payload.send_day_of_night);
+  if (payload.time_day_of_night !== undefined) updateFields.time_day_of_night = payload.time_day_of_night;
+  if (payload.send_day_after !== undefined) updateFields.send_day_after = Boolean(payload.send_day_after);
+  if (payload.time_day_after !== undefined) updateFields.time_day_after = payload.time_day_after;
+
+  const { data, error } = await admin
+    .from('billing_settings')
+    .update(updateFields)
+    .eq('id', existing.id)
+    .select('id, user_id, timezone, send_day_before, time_day_before, send_day_of_morning, time_day_of_morning, send_day_of_night, time_day_of_night, send_day_after, time_day_after, created_at, updated_at')
+    .single();
+
+  if (error) {
+    throw new Error(`Falha ao atualizar configurações de cobrança no Supabase: ${error.message}`);
+  }
+
+  return data as SupabaseBillingSettings;
+}
+
+// --- MODELOS DE MENSAGENS (public.message_templates) ---
+
+export interface SupabaseMessageTemplate {
+  id: string;
+  user_id: string;
+  type: 'day_before' | 'day_of' | 'day_after';
+  title: string;
+  template_text: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function getSupabaseMessageTemplates(userId: string): Promise<SupabaseMessageTemplate[]> {
+  const admin = getSupabaseAdmin();
+  if (!isValidUUID(userId)) return [];
+
+  const { data, error } = await admin
+    .from('message_templates')
+    .select('id, user_id, type, title, template_text, created_at, updated_at')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: true });
+
+  if (error || !data) return [];
+  return data as SupabaseMessageTemplate[];
+}
+
+export async function ensureSupabaseMessageTemplates(userId: string): Promise<SupabaseMessageTemplate[]> {
+  const admin = getSupabaseAdmin();
+  if (!isValidUUID(userId)) return [];
+
+  const existing = await getSupabaseMessageTemplates(userId);
+  if (existing && existing.length >= 3) {
+    return existing;
+  }
+
+  const existingTypes = new Set(existing.map((t) => t.type));
+  const defaults: Array<{ type: 'day_before' | 'day_of' | 'day_after'; title: string; template_text: string }> = [
+    {
+      type: 'day_before',
+      title: 'Lembrete de Vencimento (1 dia antes)',
+      template_text: 'Olá, {nome}! Tudo bem? 😊 Passando para lembrar que seu plano {plano} vence amanhã, dia {vencimento}. Valor: {valor}. Qualquer dúvida, estou à disposição!',
+    },
+    {
+      type: 'day_of',
+      title: 'Lembrete no Dia do Vencimento',
+      template_text: 'Olá, {nome}! 😊 Hoje é o vencimento do seu plano {plano}. O valor é {valor}. Entre em contato para regularizar e continuar utilizando seu serviço normalmente.',
+    },
+    {
+      type: 'day_after',
+      title: 'Aviso de Vencimento Atrasado (1 dia depois)',
+      template_text: 'Olá, {nome}! Identificamos que o vencimento do seu plano {plano} foi ontem, dia {vencimento}. Caso já tenha realizado o pagamento, por favor, desconsidere esta mensagem. Se precisar de ajuda, estamos à disposição.',
+    },
+  ];
+
+  const toInsert = defaults.filter((d) => !existingTypes.has(d.type));
+  if (toInsert.length > 0) {
+    const now = new Date().toISOString();
+    const records = toInsert.map((d) => ({
+      id: randomUUID(),
+      user_id: userId,
+      type: d.type,
+      title: d.title,
+      template_text: d.template_text,
+      created_at: now,
+      updated_at: now,
+    }));
+
+    await admin.from('message_templates').insert(records);
+  }
+
+  return getSupabaseMessageTemplates(userId);
+}
+
+export async function updateSupabaseMessageTemplate(
+  userId: string,
+  type: string,
+  templateText: string
+): Promise<SupabaseMessageTemplate> {
+  const admin = getSupabaseAdmin();
+  if (!isValidUUID(userId)) {
+    throw new Error('ID_INVALID: UUID inválido para modelo de mensagem');
+  }
+
+  // Garante que os modelos existem no Supabase
+  await ensureSupabaseMessageTemplates(userId);
+
+  const now = new Date().toISOString();
+  const { data, error } = await admin
+    .from('message_templates')
+    .update({
+      template_text: templateText.trim(),
+      updated_at: now,
+    })
+    .eq('user_id', userId)
+    .eq('type', type)
+    .select('id, user_id, type, title, template_text, created_at, updated_at')
+    .single();
+
+  if (error || !data) {
+    throw new Error(`Falha ao atualizar modelo de mensagem no Supabase: ${error?.message || 'Não encontrado'}`);
+  }
+
+  return data as SupabaseMessageTemplate;
+}
+

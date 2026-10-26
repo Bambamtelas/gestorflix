@@ -27,6 +27,15 @@ import {
   getSupabaseSubscription,
   ensureSupabaseSubscription,
   updateSupabaseSubscriptionStatus,
+  getSupabaseWhatsAppSettings,
+  ensureSupabaseWhatsAppSettings,
+  updateSupabaseWhatsAppSettings,
+  getSupabaseBillingSettings,
+  ensureSupabaseBillingSettings,
+  updateSupabaseBillingSettings,
+  getSupabaseMessageTemplates,
+  ensureSupabaseMessageTemplates,
+  updateSupabaseMessageTemplate,
   isValidUUID,
 } from './src/server/supabaseAdmin';
 
@@ -654,6 +663,12 @@ function checkAndHandleInstanceDisconnect(userId: string, httpStatus: number, re
     errorStr.includes('connection lost');
 
   if (isDisconnected) {
+    if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(userId)) {
+      updateSupabaseWhatsAppSettings(userId, {
+        is_connected: false,
+        last_checked_at: new Date().toISOString(),
+      }).catch((e) => console.warn('Falha ao atualizar desconexão do WhatsApp no Supabase:', e));
+    }
     const ws = db.whatsapp_settings.find((w) => isUserMatch(w.user_id, { id: userId }));
     if (ws && ws.is_connected) {
       ws.is_connected = false;
@@ -1001,8 +1016,18 @@ async function runBillingCycleCheck(targetUserId?: string): Promise<{ processed:
     const subCheck = await checkUserSubscription(user.id, (user as any).legacy_id, user.role);
     if (!subCheck.allowed) continue;
 
-    // Check WhatsApp settings
-    const ws = db.whatsapp_settings.find((w) => isUserMatch(w.user_id, user));
+    // Check WhatsApp settings (Supabase authoritative)
+    let ws: any = null;
+    if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+      try {
+        ws = await getSupabaseWhatsAppSettings(user.id);
+      } catch (e) {
+        console.warn('Erro ao carregar whatsapp_settings do Supabase:', e);
+      }
+    }
+    if (!ws) {
+      ws = db.whatsapp_settings.find((w) => isUserMatch(w.user_id, user));
+    }
     if (!ws || !ws.auto_billing_enabled) {
       continue;
     }
@@ -1012,28 +1037,48 @@ async function runBillingCycleCheck(targetUserId?: string): Promise<{ processed:
     const targetUrl = evolution.cleanUrl;
     const targetKey = evolution.apiKey;
 
-    // Check Billing Settings
-    let bs = db.billing_settings.find((b) => isUserMatch(b.user_id, user));
+    // Check Billing Settings (Supabase authoritative)
+    let bs: any = null;
+    if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+      try {
+        bs = await getSupabaseBillingSettings(user.id);
+      } catch (e) {
+        console.warn('Erro ao carregar billing_settings do Supabase:', e);
+      }
+    }
     if (!bs) {
-      bs = {
-        id: 'bs-' + user.id,
-        user_id: user.id,
-        timezone: 'America/Sao_Paulo',
-        send_day_before: true,
-        time_day_before: '09:00',
-        send_day_of_morning: true,
-        time_day_of_morning: '09:00',
-        send_day_of_night: true,
-        time_day_of_night: '19:00',
-        send_day_after: true,
-        time_day_after: '10:00',
-      };
-      db.billing_settings.push(bs);
+      bs = db.billing_settings.find((b) => isUserMatch(b.user_id, user));
+      if (!bs) {
+        bs = {
+          id: 'bs-' + user.id,
+          user_id: user.id,
+          timezone: 'America/Sao_Paulo',
+          send_day_before: true,
+          time_day_before: '09:00',
+          send_day_of_morning: true,
+          time_day_of_morning: '09:00',
+          send_day_of_night: true,
+          time_day_of_night: '19:00',
+          send_day_after: true,
+          time_day_after: '10:00',
+        };
+        db.billing_settings.push(bs);
+      }
     }
     const safeBs = bs;
 
-    // Get user templates
-    const templates = db.message_templates.filter((t) => isUserMatch(t.user_id, user));
+    // Get user templates (Supabase authoritative)
+    let templates: any[] = [];
+    if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+      try {
+        templates = await getSupabaseMessageTemplates(user.id);
+      } catch (e) {
+        console.warn('Erro ao carregar message_templates do Supabase:', e);
+      }
+    }
+    if (!templates || templates.length === 0) {
+      templates = db.message_templates.filter((t) => isUserMatch(t.user_id, user));
+    }
     const tplBefore = templates.find((t) => t.type === 'day_before')?.template_text ||
       'Olá, {nome}! Tudo bem? 😊 Passando para lembrar que seu plano {plano} vence amanhã, dia {vencimento}. Valor: {valor}. Qualquer dúvida, estou à disposição!';
     const tplDay = templates.find((t) => t.type === 'day_of')?.template_text ||
@@ -1377,7 +1422,13 @@ async function startServer() {
 
     try {
       const metrics = await getSupabaseDashboardMetrics(user.id, user.role === 'admin');
-      const ws = db.whatsapp_settings.find((w) => isUserMatch(w.user_id, user));
+      let ws: any = null;
+      if (isValidUUID(user.id)) {
+        ws = await getSupabaseWhatsAppSettings(user.id).catch(() => null);
+      }
+      if (!ws) {
+        ws = db.whatsapp_settings.find((w) => isUserMatch(w.user_id, user));
+      }
       const subCheck = await checkUserSubscription(user.id, user.legacy_id, user.role);
 
       return res.json({
@@ -1804,75 +1855,76 @@ async function startServer() {
   });
 
   // 6. WHATSAPP & EVOLUTION API SETTINGS & INSTANCES
-  app.get('/api/whatsapp/settings', authenticateUser, (req, res) => {
-    const user = (req as any).user;
-    const evolution = getActiveEvolutionConfig();
-    const instanceName = getResellerInstanceName(user.id);
-
-    let ws = db.whatsapp_settings.find((w) => isUserMatch(w.user_id, user));
-    if (!ws) {
-      ws = {
-        id: 'ws-' + user.id,
-        user_id: user.id,
-        api_url: evolution.cleanUrl,
-        instance_name: instanceName,
-        api_key: evolution.apiKey,
-        is_connected: false,
-        auto_billing_enabled: false,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
-      db.whatsapp_settings.push(ws);
-      saveDB(db);
-    }
-
-    return res.json({
-      instance_name: instanceName,
-      is_connected: ws.is_connected,
-      auto_billing_enabled: ws.auto_billing_enabled,
-      central_configured: evolution.isConfigured,
-      last_checked_at: ws.last_checked_at,
-    });
-  });
-
-  app.post('/api/whatsapp/settings', authenticateUser, (req, res) => {
-    const user = (req as any).user;
-    const { auto_billing_enabled } = req.body;
-    const evolution = getActiveEvolutionConfig();
-    const instanceName = getResellerInstanceName(user.id);
-
-    let ws = db.whatsapp_settings.find((w) => isUserMatch(w.user_id, user));
-    if (!ws) {
-      ws = {
-        id: 'ws-' + user.id,
-        user_id: user.id,
-        api_url: evolution.cleanUrl,
-        instance_name: instanceName,
-        api_key: evolution.apiKey,
-        is_connected: false,
-        auto_billing_enabled: false,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
-      db.whatsapp_settings.push(ws);
-    }
-
-    if (auto_billing_enabled !== undefined) {
-      ws.auto_billing_enabled = Boolean(auto_billing_enabled);
-    }
-
-    ws.updated_at = new Date().toISOString();
-    saveDB(db);
-
-    return res.json({ success: true, message: 'Configurações do WhatsApp salvas com sucesso' });
-  });
-
-  // Query individual reseller instance status from Evolution API
-  app.get('/api/whatsapp/instance/status', authenticateUser, async (req, res) => {
+  app.get('/api/whatsapp/settings', authenticateUser, async (req, res) => {
     try {
       const user = (req as any).user;
       const evolution = getActiveEvolutionConfig();
       const instanceName = getResellerInstanceName(user.id);
+
+      let ws: any = null;
+      if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+        try {
+          ws = await ensureSupabaseWhatsAppSettings(user.id);
+        } catch (supErr) {
+          console.warn('Alerta ao consultar whatsapp_settings no Supabase:', supErr);
+        }
+      }
+
+      if (!ws) {
+        ws = db.whatsapp_settings.find((w) => isUserMatch(w.user_id, user));
+        if (!ws) {
+          ws = {
+            id: 'ws-' + user.id,
+            user_id: user.id,
+            api_url: evolution.cleanUrl,
+            instance_name: instanceName,
+            api_key: evolution.apiKey,
+            is_connected: false,
+            auto_billing_enabled: false,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+          db.whatsapp_settings.push(ws);
+          saveDB(db);
+        }
+      }
+
+      return res.json({
+        instance_name: instanceName,
+        is_connected: Boolean(ws.is_connected),
+        auto_billing_enabled: Boolean(ws.auto_billing_enabled),
+        central_configured: evolution.isConfigured,
+        last_checked_at: ws.last_checked_at,
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao carregar configurações do WhatsApp: ${err.message || String(err)}`,
+      });
+    }
+  });
+
+  app.post('/api/whatsapp/settings', authenticateUser, async (req, res) => {
+    try {
+      const user = (req as any).user;
+      const { auto_billing_enabled } = req.body;
+      const evolution = getActiveEvolutionConfig();
+      const instanceName = getResellerInstanceName(user.id);
+      const isEnabled = Boolean(auto_billing_enabled);
+
+      if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+        try {
+          await updateSupabaseWhatsAppSettings(user.id, {
+            auto_billing_enabled: isEnabled,
+          });
+        } catch (supErr: any) {
+          console.error('Erro ao salvar whatsapp_settings no Supabase:', supErr);
+          return res.status(500).json({
+            error: 'DATABASE_ERROR',
+            message: `Falha ao salvar configurações do WhatsApp no Supabase: ${supErr.message || String(supErr)}`,
+          });
+        }
+      }
 
       let ws = db.whatsapp_settings.find((w) => isUserMatch(w.user_id, user));
       if (!ws) {
@@ -1883,11 +1935,58 @@ async function startServer() {
           instance_name: instanceName,
           api_key: evolution.apiKey,
           is_connected: false,
-          auto_billing_enabled: false,
+          auto_billing_enabled: isEnabled,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         };
         db.whatsapp_settings.push(ws);
+      } else {
+        ws.auto_billing_enabled = isEnabled;
+        ws.updated_at = new Date().toISOString();
+      }
+      saveDB(db);
+
+      return res.json({ success: true, message: 'Configurações do WhatsApp salvas com sucesso' });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao processar configurações do WhatsApp: ${err.message || String(err)}`,
+      });
+    }
+  });
+
+  // Query individual reseller instance status from Evolution API
+  app.get('/api/whatsapp/instance/status', authenticateUser, async (req, res) => {
+    try {
+      const user = (req as any).user;
+      const evolution = getActiveEvolutionConfig();
+      const instanceName = getResellerInstanceName(user.id);
+
+      let ws: any = null;
+      if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+        try {
+          ws = await ensureSupabaseWhatsAppSettings(user.id);
+        } catch (supErr) {
+          console.warn('Alerta ao consultar status no Supabase:', supErr);
+        }
+      }
+
+      if (!ws) {
+        ws = db.whatsapp_settings.find((w) => isUserMatch(w.user_id, user));
+        if (!ws) {
+          ws = {
+            id: 'ws-' + user.id,
+            user_id: user.id,
+            api_url: evolution.cleanUrl,
+            instance_name: instanceName,
+            api_key: evolution.apiKey,
+            is_connected: false,
+            auto_billing_enabled: false,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+          db.whatsapp_settings.push(ws);
+        }
       }
 
       if (!evolution.isConfigured) {
@@ -1910,9 +2009,14 @@ async function startServer() {
         signal: AbortSignal.timeout(8000),
       });
 
+      const nowIso = new Date().toISOString();
+
       if (response.status === 404) {
+        if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+          updateSupabaseWhatsAppSettings(user.id, { is_connected: false, last_checked_at: nowIso }).catch(() => {});
+        }
         ws.is_connected = false;
-        ws.last_checked_at = new Date().toISOString();
+        ws.last_checked_at = nowIso;
         saveDB(db);
         return res.json({
           configured: true,
@@ -1927,9 +2031,12 @@ async function startServer() {
 
       const data = await response.json().catch(() => ({}));
       const state = String(data?.instance?.state || data?.state || '').toLowerCase();
-      ws.last_checked_at = new Date().toISOString();
+      ws.last_checked_at = nowIso;
 
       if (response.ok && state === 'open') {
+        if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+          updateSupabaseWhatsAppSettings(user.id, { is_connected: true, last_checked_at: nowIso }).catch(() => {});
+        }
         ws.is_connected = true;
         ws.api_url = evolution.cleanUrl;
         ws.instance_name = instanceName;
@@ -1945,6 +2052,9 @@ async function startServer() {
           last_checked_at: ws.last_checked_at,
         });
       } else if (state === 'connecting') {
+        if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+          updateSupabaseWhatsAppSettings(user.id, { is_connected: false, last_checked_at: nowIso }).catch(() => {});
+        }
         ws.is_connected = false;
         saveDB(db);
         return res.json({
@@ -1957,6 +2067,9 @@ async function startServer() {
           last_checked_at: ws.last_checked_at,
         });
       } else {
+        if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+          updateSupabaseWhatsAppSettings(user.id, { is_connected: false, last_checked_at: nowIso }).catch(() => {});
+        }
         ws.is_connected = false;
         saveDB(db);
         return res.json({
@@ -2152,11 +2265,23 @@ async function startServer() {
       const user = (req as any).user;
       const evolution = getActiveEvolutionConfig();
       const instanceName = getResellerInstanceName(user.id);
+      const nowIso = new Date().toISOString();
+
+      if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+        try {
+          await updateSupabaseWhatsAppSettings(user.id, {
+            is_connected: false,
+            last_checked_at: nowIso,
+          });
+        } catch (supErr) {
+          console.warn('Erro ao atualizar desconexão do WhatsApp no Supabase:', supErr);
+        }
+      }
 
       let ws = db.whatsapp_settings.find((w) => isUserMatch(w.user_id, user));
       if (ws) {
         ws.is_connected = false;
-        ws.last_checked_at = new Date().toISOString();
+        ws.last_checked_at = nowIso;
         saveDB(db);
       }
 
@@ -2208,14 +2333,27 @@ async function startServer() {
 
       const data = await response.json().catch(() => ({}));
       const state = String(data?.instance?.state || data?.state || '').toLowerCase();
+      const isConnected = response.ok && state === 'open';
+      const nowIso = new Date().toISOString();
+
+      if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+        try {
+          await updateSupabaseWhatsAppSettings(user.id, {
+            is_connected: isConnected,
+            last_checked_at: nowIso,
+          });
+        } catch (supErr) {
+          console.warn('Alerta ao atualizar status da conexão no Supabase:', supErr);
+        }
+      }
 
       if (ws) {
-        ws.last_checked_at = new Date().toISOString();
-        ws.is_connected = response.ok && state === 'open';
+        ws.last_checked_at = nowIso;
+        ws.is_connected = isConnected;
         saveDB(db);
       }
 
-      if (response.ok && state === 'open') {
+      if (isConnected) {
         return res.json({
           is_connected: true,
           state: 'open',
@@ -2231,9 +2369,13 @@ async function startServer() {
         });
       }
     } catch (err: any) {
+      const nowIso = new Date().toISOString();
+      if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+        updateSupabaseWhatsAppSettings(user.id, { is_connected: false, last_checked_at: nowIso }).catch(() => {});
+      }
       if (ws) {
         ws.is_connected = false;
-        ws.last_checked_at = new Date().toISOString();
+        ws.last_checked_at = nowIso;
         saveDB(db);
       }
       return res.status(502).json({
@@ -2396,7 +2538,17 @@ async function startServer() {
 
     let messageText = custom_text;
     if (!messageText) {
-      const templates = db.message_templates.filter((t) => isUserMatch(t.user_id, user));
+      let templates: any[] = [];
+      if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+        try {
+          templates = await getSupabaseMessageTemplates(user.id);
+        } catch (e) {
+          console.warn('Erro ao carregar templates do Supabase em send-manual:', e);
+        }
+      }
+      if (!templates || templates.length === 0) {
+        templates = db.message_templates.filter((t) => isUserMatch(t.user_id, user));
+      }
       const chosenTpl = templates.find((t) => t.type === template_type) || templates[0];
       messageText = chosenTpl ? chosenTpl.template_text : 'Olá, {nome}! Seu plano {plano} vence em {vencimento}.';
     }
@@ -2468,107 +2620,214 @@ async function startServer() {
   });
 
   // 7. BILLING SETTINGS & TEMPLATES
-  app.get('/api/billing/settings', authenticateUser, (req, res) => {
-    const user = (req as any).user;
-    let bs = db.billing_settings.find((b) => isUserMatch(b.user_id, user));
-    if (!bs) {
-      bs = {
-        id: 'bs-' + user.id,
-        user_id: user.id,
-        timezone: 'America/Sao_Paulo',
-        send_day_before: true,
-        time_day_before: '09:00',
-        send_day_of_morning: true,
-        time_day_of_morning: '09:00',
-        send_day_of_night: true,
-        time_day_of_night: '19:00',
-        send_day_after: true,
-        time_day_after: '10:00',
-      };
-      db.billing_settings.push(bs);
-      saveDB(db);
+  app.get('/api/billing/settings', authenticateUser, async (req, res) => {
+    try {
+      const user = (req as any).user;
+      let bs: any = null;
+
+      if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+        try {
+          bs = await ensureSupabaseBillingSettings(user.id);
+        } catch (supErr) {
+          console.warn('Erro ao buscar billing_settings no Supabase:', supErr);
+        }
+      }
+
+      if (!bs) {
+        bs = db.billing_settings.find((b) => isUserMatch(b.user_id, user));
+        if (!bs) {
+          bs = {
+            id: 'bs-' + user.id,
+            user_id: user.id,
+            timezone: 'America/Sao_Paulo',
+            send_day_before: true,
+            time_day_before: '09:00',
+            send_day_of_morning: true,
+            time_day_of_morning: '09:00',
+            send_day_of_night: true,
+            time_day_of_night: '19:00',
+            send_day_after: true,
+            time_day_after: '10:00',
+          };
+          db.billing_settings.push(bs);
+          saveDB(db);
+        }
+      }
+
+      return res.json(bs);
+    } catch (err: any) {
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao carregar horários de cobrança: ${err.message || String(err)}`,
+      });
     }
-    return res.json(bs);
   });
 
-  app.post('/api/billing/settings', authenticateUser, (req, res) => {
-    const user = (req as any).user;
-    let bs = db.billing_settings.find((b) => isUserMatch(b.user_id, user));
-    if (!bs) {
-      bs = {
-        id: 'bs-' + user.id,
-        user_id: user.id,
-        timezone: 'America/Sao_Paulo',
-        send_day_before: true,
-        time_day_before: '09:00',
-        send_day_of_morning: true,
-        time_day_of_morning: '09:00',
-        send_day_of_night: true,
-        time_day_of_night: '19:00',
-        send_day_after: true,
-        time_day_after: '10:00',
-      };
-      db.billing_settings.push(bs);
+  app.post('/api/billing/settings', authenticateUser, async (req, res) => {
+    try {
+      const user = (req as any).user;
+      const {
+        timezone,
+        send_day_before,
+        time_day_before,
+        send_day_of_morning,
+        time_day_of_morning,
+        send_day_of_night,
+        time_day_of_night,
+        send_day_after,
+        time_day_after,
+      } = req.body;
+
+      const payload: any = {};
+      if (timezone) payload.timezone = timezone;
+      if (send_day_before !== undefined) payload.send_day_before = Boolean(send_day_before);
+      if (time_day_before) payload.time_day_before = time_day_before;
+      if (send_day_of_morning !== undefined) payload.send_day_of_morning = Boolean(send_day_of_morning);
+      if (time_day_of_morning) payload.time_day_of_morning = time_day_of_morning;
+      if (send_day_of_night !== undefined) payload.send_day_of_night = Boolean(send_day_of_night);
+      if (time_day_of_night) payload.time_day_of_night = time_day_of_night;
+      if (send_day_after !== undefined) payload.send_day_after = Boolean(send_day_after);
+      if (time_day_after) payload.time_day_after = time_day_after;
+
+      let savedBs: any = null;
+      if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+        try {
+          savedBs = await updateSupabaseBillingSettings(user.id, payload);
+        } catch (supErr: any) {
+          console.error('Erro ao salvar billing_settings no Supabase:', supErr);
+          return res.status(500).json({
+            error: 'DATABASE_ERROR',
+            message: `Falha ao salvar horários de cobrança no banco de dados: ${supErr.message || String(supErr)}`,
+          });
+        }
+      }
+
+      // Sincroniza cache local db.json
+      let localBs = db.billing_settings.find((b) => isUserMatch(b.user_id, user));
+      if (!localBs) {
+        localBs = {
+          id: savedBs?.id || ('bs-' + user.id),
+          user_id: user.id,
+          timezone: timezone || 'America/Sao_Paulo',
+          send_day_before: send_day_before !== undefined ? Boolean(send_day_before) : true,
+          time_day_before: time_day_before || '09:00',
+          send_day_of_morning: send_day_of_morning !== undefined ? Boolean(send_day_of_morning) : true,
+          time_day_of_morning: time_day_of_morning || '09:00',
+          send_day_of_night: send_day_of_night !== undefined ? Boolean(send_day_of_night) : true,
+          time_day_of_night: time_day_of_night || '19:00',
+          send_day_after: send_day_after !== undefined ? Boolean(send_day_after) : true,
+          time_day_after: time_day_after || '10:00',
+        };
+        db.billing_settings.push(localBs);
+      } else {
+        if (timezone) localBs.timezone = timezone;
+        if (send_day_before !== undefined) localBs.send_day_before = Boolean(send_day_before);
+        if (time_day_before) localBs.time_day_before = time_day_before;
+        if (send_day_of_morning !== undefined) localBs.send_day_of_morning = Boolean(send_day_of_morning);
+        if (time_day_of_morning) localBs.time_day_of_morning = time_day_of_morning;
+        if (send_day_of_night !== undefined) localBs.send_day_of_night = Boolean(send_day_of_night);
+        if (time_day_of_night) localBs.time_day_of_night = time_day_of_night;
+        if (send_day_after !== undefined) localBs.send_day_after = Boolean(send_day_after);
+        if (time_day_after) localBs.time_day_after = time_day_after;
+      }
+      saveDB(db);
+
+      return res.json({
+        success: true,
+        settings: savedBs || localBs,
+        message: 'Horários de cobrança salvos!',
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao processar horários de cobrança: ${err.message || String(err)}`,
+      });
     }
-
-    const {
-      timezone,
-      send_day_before,
-      time_day_before,
-      send_day_of_morning,
-      time_day_of_morning,
-      send_day_of_night,
-      time_day_of_night,
-      send_day_after,
-      time_day_after,
-    } = req.body;
-
-    if (timezone) bs.timezone = timezone;
-    if (send_day_before !== undefined) bs.send_day_before = Boolean(send_day_before);
-    if (time_day_before) bs.time_day_before = time_day_before;
-    if (send_day_of_morning !== undefined) bs.send_day_of_morning = Boolean(send_day_of_morning);
-    if (time_day_of_morning) bs.time_day_of_morning = time_day_of_morning;
-    if (send_day_of_night !== undefined) bs.send_day_of_night = Boolean(send_day_of_night);
-    if (time_day_of_night) bs.time_day_of_night = time_day_of_night;
-    if (send_day_after !== undefined) bs.send_day_after = Boolean(send_day_after);
-    if (time_day_after) bs.time_day_after = time_day_after;
-
-    saveDB(db);
-    return res.json({ success: true, settings: bs, message: 'Horários de cobrança salvos!' });
   });
 
   // Templates
-  app.get('/api/billing/templates', authenticateUser, (req, res) => {
-    const user = (req as any).user;
-    const userTemplates = db.message_templates.filter((t) => isUserMatch(t.user_id, user));
-    return res.json(userTemplates);
+  app.get('/api/billing/templates', authenticateUser, async (req, res) => {
+    try {
+      const user = (req as any).user;
+      let templates: any[] = [];
+
+      if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+        try {
+          templates = await ensureSupabaseMessageTemplates(user.id);
+        } catch (supErr) {
+          console.warn('Erro ao carregar message_templates do Supabase:', supErr);
+        }
+      }
+
+      if (!templates || templates.length === 0) {
+        templates = db.message_templates.filter((t) => isUserMatch(t.user_id, user));
+      }
+
+      return res.json(templates);
+    } catch (err: any) {
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao carregar modelos de mensagem: ${err.message || String(err)}`,
+      });
+    }
   });
 
-  app.put('/api/billing/templates/:type', authenticateUser, (req, res) => {
-    const user = (req as any).user;
-    const { type } = req.params;
-    const { template_text } = req.body;
+  app.put('/api/billing/templates/:type', authenticateUser, async (req, res) => {
+    try {
+      const user = (req as any).user;
+      const { type } = req.params;
+      const { template_text } = req.body;
 
-    if (!template_text) return res.status(400).json({ error: 'Texto do modelo é obrigatório' });
+      if (!template_text || typeof template_text !== 'string' || !template_text.trim()) {
+        return res.status(400).json({ error: 'Texto do modelo é obrigatório' });
+      }
 
-    let tpl = db.message_templates.find((t) => isUserMatch(t.user_id, user) && t.type === type);
-    if (!tpl) {
-      tpl = {
-        id: 'tpl-' + type + '-' + user.id,
-        user_id: user.id,
-        type: type as any,
-        title: type === 'day_before' ? 'Lembrete de Vencimento' : type === 'day_of' ? 'Lembrete no Dia' : 'Aviso de Vencimento Atrasado',
-        template_text,
-        updated_at: new Date().toISOString(),
-      };
-      db.message_templates.push(tpl);
-    } else {
-      tpl.template_text = template_text;
-      tpl.updated_at = new Date().toISOString();
+      if (!['day_before', 'day_of', 'day_after'].includes(type)) {
+        return res.status(400).json({ error: 'Tipo de modelo inválido. Deve ser day_before, day_of ou day_after' });
+      }
+
+      let savedTemplate: any = null;
+      if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+        try {
+          savedTemplate = await updateSupabaseMessageTemplate(user.id, type, template_text);
+        } catch (supErr: any) {
+          console.error('Erro ao atualizar modelo de mensagem no Supabase:', supErr);
+          return res.status(500).json({
+            error: 'DATABASE_ERROR',
+            message: `Falha ao salvar modelo no banco de dados: ${supErr.message || String(supErr)}`,
+          });
+        }
+      }
+
+      // Sincroniza cache local db.json
+      let tpl = db.message_templates.find((t) => isUserMatch(t.user_id, user) && t.type === type);
+      if (!tpl) {
+        tpl = {
+          id: savedTemplate?.id || ('tpl-' + type + '-' + user.id),
+          user_id: user.id,
+          type: type as any,
+          title: type === 'day_before' ? 'Lembrete de Vencimento' : type === 'day_of' ? 'Lembrete no Dia' : 'Aviso de Vencimento Atrasado',
+          template_text: template_text.trim(),
+          updated_at: new Date().toISOString(),
+        };
+        db.message_templates.push(tpl);
+      } else {
+        tpl.template_text = template_text.trim();
+        tpl.updated_at = new Date().toISOString();
+      }
+      saveDB(db);
+
+      return res.json({
+        success: true,
+        template: savedTemplate || tpl,
+        message: 'Modelo salvo com sucesso!',
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        error: 'DATABASE_ERROR',
+        message: `Falha ao processar modelo de mensagem: ${err.message || String(err)}`,
+      });
     }
-
-    saveDB(db);
-    return res.json({ success: true, template: tpl, message: 'Modelo salvo com sucesso!' });
   });
 
   // Manual Trigger Billing Cycle (Worker)
@@ -2678,6 +2937,10 @@ async function startServer() {
           .from('customers')
           .select('id, user_id');
 
+        const { data: supWsSettings } = await supabaseAdmin
+          .from('whatsapp_settings')
+          .select('user_id, is_connected');
+
         if (profiles) {
           for (const p of profiles) {
             const emailKey = (p.email || '').toLowerCase();
@@ -2687,6 +2950,8 @@ async function startServer() {
             const legacyCustCount = db.customers.filter((c) => c.user_id === p.id || (existing && c.user_id === existing.id)).length;
             const custCount = supabaseCustCount + legacyCustCount;
             const ws = db.whatsapp_settings.find((w) => w.user_id === p.id || (existing && w.user_id === existing.id));
+            const supWs = supWsSettings?.find((w) => w.user_id === p.id);
+            const isWhatsAppConnected = supWs !== undefined ? Boolean(supWs.is_connected) : Boolean(ws?.is_connected);
 
             const subData = supSub
               ? {
@@ -2708,7 +2973,7 @@ async function startServer() {
               created_at: p.created_at || existing?.created_at || new Date().toISOString(),
               customer_count: custCount,
               subscription: subData,
-              whatsapp_connected: !!ws?.is_connected,
+              whatsapp_connected: isWhatsAppConnected,
             });
           }
         }
