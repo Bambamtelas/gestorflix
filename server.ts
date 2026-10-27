@@ -5,6 +5,17 @@ import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
 import {
+  getMercadoPagoConfig,
+  saveMercadoPagoConfig,
+  testMercadoPagoConnection,
+  createPixCharge,
+  verifyAndProcessPayment,
+  verifyMercadoPagoSignature,
+  findRecentPendingPayment,
+  findPaymentByIdOrMpId,
+  grantLifetimeSubscription,
+} from './src/server/mercadoPagoService';
+import {
   isSupabaseServerConfigured,
   testSupabaseServerConnection,
   verifySupabaseToken,
@@ -36,6 +47,11 @@ import {
   getSupabaseMessageTemplates,
   ensureSupabaseMessageTemplates,
   updateSupabaseMessageTemplate,
+  getSupabaseCentralEvolutionConfig,
+  updateSupabaseCentralEvolutionConfig,
+  getSupabaseMessageLogs,
+  saveSupabaseMessageLog,
+  checkSupabaseIdempotency,
   isValidUUID,
 } from './src/server/supabaseAdmin';
 
@@ -470,7 +486,11 @@ interface EvolutionGlobalConfig {
   updated_by?: string;
 }
 
-function loadEvolutionGlobalConfig(): EvolutionGlobalConfig {
+let cachedEvolutionConfig: EvolutionGlobalConfig | null = null;
+let lastEvolutionCacheTime = 0;
+const EVOLUTION_CACHE_TTL_MS = 15000;
+
+function loadEvolutionGlobalConfigSync(): EvolutionGlobalConfig {
   try {
     if (fs.existsSync(EVOLUTION_CONFIG_FILE)) {
       const content = fs.readFileSync(EVOLUTION_CONFIG_FILE, 'utf-8');
@@ -494,9 +514,57 @@ function loadEvolutionGlobalConfig(): EvolutionGlobalConfig {
   };
 }
 
+async function loadEvolutionGlobalConfigAsync(): Promise<EvolutionGlobalConfig> {
+  const now = Date.now();
+  if (cachedEvolutionConfig && now - lastEvolutionCacheTime < EVOLUTION_CACHE_TTL_MS) {
+    return cachedEvolutionConfig;
+  }
+
+  // 1. Consulta autoritativa no Supabase (Fonte de Verdade Compartilhada entre Ambientes)
+  if (isSupabaseServerConfigured && supabaseAdmin) {
+    try {
+      const supConfig = await getSupabaseCentralEvolutionConfig();
+      if (supConfig && (supConfig.api_url || supConfig.api_key)) {
+        cachedEvolutionConfig = {
+          api_url: supConfig.api_url || '',
+          api_key: supConfig.api_key || '',
+          updated_at: supConfig.updated_at || undefined,
+          updated_by: supConfig.updated_by || 'admin',
+        };
+        lastEvolutionCacheTime = now;
+        return cachedEvolutionConfig;
+      }
+    } catch (supErr) {
+      console.warn('Alerta ao consultar configuração central da Evolution no Supabase:', supErr);
+    }
+  }
+
+  // 2. Fallback: Arquivo local data/evolution-config.json
+  const local = loadEvolutionGlobalConfigSync();
+  if (local.api_url || local.api_key) {
+    cachedEvolutionConfig = local;
+    lastEvolutionCacheTime = now;
+    return cachedEvolutionConfig;
+  }
+
+  // 3. Fallback: Variáveis de ambiente .env
+  cachedEvolutionConfig = {
+    api_url: (process.env.EVOLUTION_API_URL || '').trim(),
+    api_key: (process.env.EVOLUTION_API_KEY || '').trim(),
+  };
+  lastEvolutionCacheTime = now;
+  return cachedEvolutionConfig;
+}
+
+function loadEvolutionGlobalConfig(): EvolutionGlobalConfig {
+  return cachedEvolutionConfig || loadEvolutionGlobalConfigSync();
+}
+
 function saveEvolutionGlobalConfig(config: EvolutionGlobalConfig) {
   try {
     fs.writeFileSync(EVOLUTION_CONFIG_FILE, JSON.stringify(config, null, 2), 'utf-8');
+    cachedEvolutionConfig = config;
+    lastEvolutionCacheTime = Date.now();
   } catch (err) {
     console.error('Failed to save evolution config file:', err);
     throw err;
@@ -512,8 +580,8 @@ function maskApiKey(key: string): string {
   return `${trimmed.slice(0, 4)}••••••••••••${trimmed.slice(-4)}`;
 }
 
-function getActiveEvolutionConfig() {
-  const central = loadEvolutionGlobalConfig();
+async function getActiveEvolutionConfig() {
+  const central = await loadEvolutionGlobalConfigAsync();
   const cleanUrl = (central.api_url || '').trim().replace(/\/+$/, '');
   const apiKey = (central.api_key || '').trim();
   const isConfigured = Boolean(cleanUrl && apiKey && /^https?:\/\//i.test(cleanUrl));
@@ -688,12 +756,29 @@ function formatDateBR(dateStr: string): string {
   return dateStr;
 }
 
-// Calculate days difference
-function getDaysDiff(targetDateStr: string): number {
+// Helper to get current date and time in specific time zone (default: America/Sao_Paulo)
+function getZonedNow(timeZone: string = 'America/Sao_Paulo'): { dateStr: string; timeStr: string } {
   const now = new Date();
-  const todayDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const parts = targetDateStr.slice(0, 10).split('-');
-  const targetDate = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+  const dateStr = now.toLocaleDateString('en-CA', { timeZone });
+  const timeStr = now.toLocaleTimeString('pt-BR', {
+    timeZone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  return { dateStr, timeStr };
+}
+
+// Calculate days difference with timezone awareness (Brasília: America/Sao_Paulo)
+function getDaysDiff(targetDateStr: string, timeZone: string = 'America/Sao_Paulo'): number {
+  if (!targetDateStr) return 0;
+  const { dateStr } = getZonedNow(timeZone);
+  const [tY, tM, tD] = dateStr.split('-').map(Number);
+  const todayDate = new Date(tY, tM - 1, tD);
+
+  const parts = targetDateStr.slice(0, 10).split('-').map(Number);
+  const targetDate = new Date(parts[0], parts[1] - 1, parts[2]);
+
   const diffTime = targetDate.getTime() - todayDate.getTime();
   return Math.round(diffTime / (1000 * 60 * 60 * 24));
 }
@@ -742,6 +827,7 @@ async function checkUserSubscription(
 ): Promise<{
   allowed: boolean;
   status: string;
+  isLifetime?: boolean;
   daysLeft: number;
   hoursLeft: number;
   reason?: string;
@@ -828,6 +914,24 @@ async function checkUserSubscription(
   const msLeft = activeEnd.getTime() - now.getTime();
   const hoursLeft = Math.max(0, Math.floor(msLeft / (1000 * 60 * 60)));
   const daysLeft = Math.max(0, Math.floor(msLeft / (1000 * 60 * 60 * 24)));
+
+  // Verificação de Licença Vitalícia (Mercado Pago Pix ou ativação vitalícia)
+  const isLifetime =
+    sub.notes === 'vitalicio' ||
+    (typeof sub.payment_reference === 'string' && sub.payment_reference.startsWith('MP_')) ||
+    periodEnd.getFullYear() >= 2090;
+
+  if (sub.status === 'active' && isLifetime) {
+    return {
+      allowed: true,
+      status: 'active',
+      isLifetime: true,
+      daysLeft: 36500,
+      hoursLeft: 876000,
+      reason: 'Licença vitalícia ativa e confirmada.',
+      subscription: { ...sub, isLifetime: true },
+    };
+  }
 
   if (sub.status === 'suspended') {
     return {
@@ -983,38 +1087,128 @@ function requireAdmin(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
+// Master Admin only middleware (Exclusivo para chavepixedvandyemis@gmail.com; não confia apenas em role === 'admin')
+function requireMasterAdmin(req: Request, res: Response, next: NextFunction) {
+  const user = (req as any).user;
+  const officialAdminEmail = (process.env.ADMIN_EMAIL || 'chavepixedvandyemis@gmail.com').trim().toLowerCase();
+  const isMaster = Boolean(user && user.email && user.email.trim().toLowerCase() === officialAdminEmail);
+
+  if (!user || !isMaster) {
+    return res.status(403).json({
+      error: 'FORBIDDEN',
+      message: 'Acesso restrito exclusivamente ao Administrador Master do Gestor FLIX.',
+    });
+  }
+  next();
+}
+
 // ====================================================================
 // AUTOMATED BILLING SCHEDULER ENGINE (Runs in server background)
 // ====================================================================
-async function runBillingCycleCheck(targetUserId?: string): Promise<{ processed: number; sent: number; failed: number; skipped: number; reason?: string }> {
+interface BillingCycleResult {
+  total_users_checked: number;
+  total_customers_checked: number;
+  eligible_candidates: number;
+  processed: number;
+  sent: number;
+  failed: number;
+  skipped: number;
+  skipped_reasons: {
+    whatsapp_not_connected?: number;
+    auto_billing_disabled?: number;
+    subscription_inactive?: number;
+    no_matching_slot_or_time?: number;
+    already_sent_today?: number;
+    invalid_phone?: number;
+  };
+  details: string[];
+  message: string;
+}
+
+export async function runBillingCycleCheck(
+  targetUserId?: string,
+  options?: { isManual?: boolean; simulateEvolution?: boolean }
+): Promise<BillingCycleResult> {
   let processed = 0;
   let sent = 0;
   let failed = 0;
   let skipped = 0;
+  let eligible_candidates = 0;
+  let total_customers_checked = 0;
+  const skipped_reasons: BillingCycleResult['skipped_reasons'] = {};
+  const details: string[] = [];
 
-  const evolution = getActiveEvolutionConfig();
+  const evolution = await getActiveEvolutionConfig();
   if (!evolution.isConfigured) {
     console.log('[BillingCycle] Central Evolution API não configurada. Disparos automáticos suspensos de forma segura.');
-    return { processed: 0, sent: 0, failed: 0, skipped: 0, reason: 'central_not_configured' };
+    return {
+      total_users_checked: 0,
+      total_customers_checked: 0,
+      eligible_candidates: 0,
+      processed: 0,
+      sent: 0,
+      failed: 0,
+      skipped: 0,
+      skipped_reasons: {},
+      details: ['Evolution API Central não configurada no Supabase'],
+      message: 'Evolution API Central não configurada pela administração.',
+    };
   }
 
-  const now = new Date();
-  const todayStr = now.toISOString().slice(0, 10);
-  const currentHour = now.getHours().toString().padStart(2, '0');
-  const currentMin = now.getMinutes().toString().padStart(2, '0');
-  const currentTime = `${currentHour}:${currentMin}`;
+  // 1. Identificar usuários a processar (Supabase PostgreSQL como fonte primária)
+  let usersToProcess: Array<{ id: string; email?: string; role?: string; legacy_id?: string }> = [];
 
-  // Process users: if targetUserId is set, isolate strictly to that user; otherwise process all non-admin users
-  const usersToProcess = targetUserId
-    ? db.users.filter((u) => u.id === targetUserId || (u as any).legacy_id === targetUserId)
-    : db.users.filter((u) => u.role !== 'admin');
+  if (isSupabaseServerConfigured && supabaseAdmin) {
+    if (targetUserId) {
+      if (isValidUUID(targetUserId)) {
+        const { data: profile } = await supabaseAdmin
+          .from('profiles')
+          .select('id, email, role')
+          .eq('id', targetUserId)
+          .maybeSingle();
+        if (profile) {
+          usersToProcess = [profile];
+        }
+      }
+      // Se não encontrou no Supabase, tenta no db.users (fallback legado)
+      if (usersToProcess.length === 0) {
+        usersToProcess = db.users.filter(
+          (u) => u.id === targetUserId || (u as any).legacy_id === targetUserId
+        );
+      }
+    } else {
+      // Background worker ou admin executando para todos
+      const { data: profiles } = await supabaseAdmin
+        .from('profiles')
+        .select('id, email, role');
+      if (profiles && profiles.length > 0) {
+        usersToProcess = profiles;
+      }
+      // Mescla usuários legados locais se houver algum não cadastrado no Supabase
+      for (const localUser of db.users) {
+        if (!usersToProcess.some((u) => u.id === localUser.id || (u.email && u.email.toLowerCase() === localUser.email.toLowerCase()))) {
+          usersToProcess.push(localUser);
+        }
+      }
+    }
+  } else {
+    // Fallback sem Supabase
+    usersToProcess = targetUserId
+      ? db.users.filter((u) => u.id === targetUserId || (u as any).legacy_id === targetUserId)
+      : db.users;
+  }
+
+  const total_users_checked = usersToProcess.length;
 
   for (const user of usersToProcess) {
-    if (user.role === 'admin') continue;
-
-    // Check if user has active sub
+    // Se targetUserId foi especificado diretamente (ex: admin clicando para si ou revendedor), processa sem pular
+    // Se for execução em massa em background, processa todos os usuários
     const subCheck = await checkUserSubscription(user.id, (user as any).legacy_id, user.role);
-    if (!subCheck.allowed) continue;
+    if (!subCheck.allowed) {
+      skipped_reasons.subscription_inactive = (skipped_reasons.subscription_inactive || 0) + 1;
+      details.push(`Gestor ${user.email || user.id}: Assinatura inativa ou expirada.`);
+      continue;
+    }
 
     // Check WhatsApp settings (Supabase authoritative)
     let ws: any = null;
@@ -1028,7 +1222,16 @@ async function runBillingCycleCheck(targetUserId?: string): Promise<{ processed:
     if (!ws) {
       ws = db.whatsapp_settings.find((w) => isUserMatch(w.user_id, user));
     }
-    if (!ws || !ws.auto_billing_enabled) {
+
+    if (!ws || !ws.is_connected) {
+      skipped_reasons.whatsapp_not_connected = (skipped_reasons.whatsapp_not_connected || 0) + 1;
+      details.push(`Gestor ${user.email || user.id}: WhatsApp não está conectado.`);
+      continue;
+    }
+
+    if (!ws.auto_billing_enabled && !options?.isManual) {
+      skipped_reasons.auto_billing_disabled = (skipped_reasons.auto_billing_disabled || 0) + 1;
+      details.push(`Gestor ${user.email || user.id}: Cobranças automáticas desativadas.`);
       continue;
     }
 
@@ -1066,6 +1269,8 @@ async function runBillingCycleCheck(targetUserId?: string): Promise<{ processed:
       }
     }
     const safeBs = bs;
+    const userTimezone = safeBs.timezone || 'America/Sao_Paulo';
+    const { dateStr: todayStr, timeStr: currentTime } = getZonedNow(userTimezone);
 
     // Get user templates (Supabase authoritative)
     let templates: any[] = [];
@@ -1087,21 +1292,29 @@ async function runBillingCycleCheck(targetUserId?: string): Promise<{ processed:
       'Olá, {nome}! Identificamos que o vencimento do seu plano {plano} foi ontem, dia {vencimento}. Caso já tenha realizado o pagamento, por favor, desconsidere esta mensagem. Se precisar de ajuda, estamos à disposição.';
 
     // Get user customers and plans strictly isolated from Supabase
-    const userCustomers = isSupabaseServerConfigured && supabaseAdmin
+    const userCustomers = isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)
       ? await getSupabaseCustomers(user.id).catch(() => [])
       : db.customers.filter((c) => isUserMatch(c.user_id, user));
 
-    const userPlans = isSupabaseServerConfigured && supabaseAdmin
+    const userPlans = isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)
       ? await getSupabasePlans(user.id).catch(() => [])
       : db.plans.filter((p) => isUserMatch(p.user_id, user));
 
+    total_customers_checked += userCustomers.length;
+
     for (const cust of userCustomers) {
-      if (!cust.whatsapp) continue;
+      if (!cust.whatsapp) {
+        skipped_reasons.invalid_phone = (skipped_reasons.invalid_phone || 0) + 1;
+        continue;
+      }
       const phoneValidation = validateWhatsAppNumber(cust.whatsapp);
-      if (!phoneValidation.valid) continue;
+      if (!phoneValidation.valid) {
+        skipped_reasons.invalid_phone = (skipped_reasons.invalid_phone || 0) + 1;
+        continue;
+      }
       const normalizedPhone = phoneValidation.normalized;
 
-      const diff = getDaysDiff(cust.expiration_date);
+      const diff = getDaysDiff(cust.expiration_date, userTimezone);
       const plan = userPlans.find((p) => p.id === cust.plan_id);
       const planName = plan ? plan.name : ((cust as any).plan_name || 'Plano IPTV');
       const planPrice = plan ? `R$ ${plan.price.toFixed(2).replace('.', ',')}` : ((cust as any).plan_price ? `R$ ${(cust as any).plan_price.toFixed(2).replace('.', ',')}` : 'R$ 0,00');
@@ -1113,36 +1326,56 @@ async function runBillingCycleCheck(targetUserId?: string): Promise<{ processed:
 
       // A. 1 day before
       if (diff === 1 && safeBs.send_day_before) {
-        if (currentTime >= safeBs.time_day_before) {
+        if (options?.isManual || currentTime >= safeBs.time_day_before) {
           triggers.push({ slot: 'day_before', template: tplBefore, schedTime: safeBs.time_day_before });
         }
       }
 
       // B. Day of expiration (morning & night separately)
       if (diff === 0) {
-        if (safeBs.send_day_of_morning && currentTime >= safeBs.time_day_of_morning) {
+        if (safeBs.send_day_of_morning && (options?.isManual || currentTime >= safeBs.time_day_of_morning)) {
           triggers.push({ slot: 'day_of_morning', template: tplDay, schedTime: safeBs.time_day_of_morning });
         }
-        if (safeBs.send_day_of_night && currentTime >= safeBs.time_day_of_night) {
+        if (safeBs.send_day_of_night && (options?.isManual || currentTime >= safeBs.time_day_of_night)) {
           triggers.push({ slot: 'day_of_night', template: tplDay, schedTime: safeBs.time_day_of_night });
         }
       }
 
-      // C. 1 day after expiration
-      if (diff === -1 && safeBs.send_day_after) {
-        if (currentTime >= safeBs.time_day_after) {
+      // C. 1 or 2 days after expiration (overdue notice)
+      if ((diff === -1 || diff === -2) && safeBs.send_day_after) {
+        if (options?.isManual || currentTime >= safeBs.time_day_after) {
           triggers.push({ slot: 'day_after', template: tplAfter, schedTime: safeBs.time_day_after });
         }
+      }
+
+      if (triggers.length === 0) {
+        skipped_reasons.no_matching_slot_or_time = (skipped_reasons.no_matching_slot_or_time || 0) + 1;
+      } else {
+        eligible_candidates++;
       }
 
       for (const item of triggers) {
         processed++;
         // Idempotency key prevents duplicate sends for same customer, cycle and slot
         const idempotencyKey = `${user.id}_${cust.id}_${cust.expiration_date}_${item.slot}`;
-        const existing = db.message_logs.find((l) => l.idempotency_key === idempotencyKey);
 
-        if (existing && (existing.status === 'sent' || existing.status === 'pending')) {
+        // Checagem de idempotência: Supabase PostgreSQL autoritativo para usuários Supabase, com fallback local seguro
+        let alreadySent = false;
+        if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+          alreadySent = await checkSupabaseIdempotency(idempotencyKey);
+        } else {
+          const existing = db.message_logs.find((l) => l.idempotency_key === idempotencyKey);
+          if (existing && existing.status === 'sent') {
+            const isSimulated = typeof existing.response_payload === 'string' && existing.response_payload.includes('"simulated":true');
+            if (!isSimulated) {
+              alreadySent = true;
+            }
+          }
+        }
+
+        if (alreadySent) {
           skipped++;
+          skipped_reasons.already_sent_today = (skipped_reasons.already_sent_today || 0) + 1;
           continue;
         }
 
@@ -1186,60 +1419,125 @@ async function runBillingCycleCheck(targetUserId?: string): Promise<{ processed:
           created_at: new Date().toISOString(),
         };
 
-        db.message_logs.unshift(logEntry);
+        // Execute Evolution API Call (or simulate if requested by test runner)
+        if (options?.simulateEvolution) {
+          logEntry.status = 'sent';
+          logEntry.response_payload = JSON.stringify({ simulated: true, success: true });
+          sent++;
+          details.push(`[SIMULAÇÃO] Mensagem ${item.slot} enviada para ${cust.name} (${normalizedPhone}).`);
+        } else {
+          try {
+            const cleanApiUrl = targetUrl.replace(/\/+$/, '');
+            const endpoint = `${cleanApiUrl}/message/sendText/${encodeURIComponent(instanceName)}`;
 
-        // Execute Evolution API Call
-        try {
-          const cleanApiUrl = targetUrl.replace(/\/+$/, '');
-          const endpoint = `${cleanApiUrl}/message/sendText/${encodeURIComponent(instanceName)}`;
+            const apiResponse = await fetch(endpoint, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                apikey: targetKey,
+              },
+              body: JSON.stringify({
+                number: normalizedPhone,
+                text: finalMessage,
+                delay: 1200,
+              }),
+              signal: AbortSignal.timeout(15000),
+            });
 
-          const apiResponse = await fetch(endpoint, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              apikey: targetKey,
-            },
-            body: JSON.stringify({
-              number: normalizedPhone,
-              text: finalMessage,
-              delay: 1200,
-            }),
-            signal: AbortSignal.timeout(10000),
-          });
+            const resData = await apiResponse.json().catch(() => ({}));
+            const sanitized = sanitizeEvolutionResponse(resData);
 
-          const resData = await apiResponse.json().catch(() => ({}));
-          const sanitized = sanitizeEvolutionResponse(resData);
-
-          if (apiResponse.ok) {
-            logEntry.status = 'sent';
-            logEntry.response_payload = JSON.stringify(sanitized);
-            sent++;
-          } else {
+            if (apiResponse.ok) {
+              logEntry.status = 'sent';
+              logEntry.response_payload = JSON.stringify(sanitized);
+              sent++;
+              details.push(`Mensagem ${item.slot} enviada com sucesso para ${cust.name}.`);
+            } else {
+              logEntry.status = 'failed';
+              logEntry.error_details = `HTTP ${apiResponse.status}: ${resData?.message || resData?.error || 'Erro no envio'}`;
+              failed++;
+              details.push(`Falha no envio para ${cust.name}: HTTP ${apiResponse.status}`);
+              checkAndHandleInstanceDisconnect(user.id, apiResponse.status, resData);
+            }
+          } catch (err: any) {
             logEntry.status = 'failed';
-            logEntry.error_details = `HTTP ${apiResponse.status}: ${resData?.message || resData?.error || 'Erro no envio'}`;
+            logEntry.error_details = err.message || 'Falha de conexão com Evolution API';
             failed++;
-            checkAndHandleInstanceDisconnect(user.id, apiResponse.status, resData);
+            details.push(`Erro de conexão para ${cust.name}: ${err.message}`);
           }
-        } catch (err: any) {
-          logEntry.status = 'failed';
-          logEntry.error_details = err.message || 'Falha de conexão com Evolution API';
-          failed++;
         }
+
+        // Persistência autoritativa no Supabase PostgreSQL
+        if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+          try {
+            await saveSupabaseMessageLog({
+              id: logId,
+              user_id: user.id,
+              customer_id: isValidUUID(cust.id) ? cust.id : null,
+              customer_name: cust.name,
+              whatsapp: normalizedPhone,
+              message_type: item.slot,
+              cycle_date: cust.expiration_date,
+              scheduled_for: `${todayStr} ${item.schedTime}`,
+              attempted_at: logEntry.attempted_at,
+              status: logEntry.status,
+              response_payload: logEntry.response_payload,
+              error_details: logEntry.error_details,
+              idempotency_key: idempotencyKey,
+            });
+          } catch (supLogErr) {
+            console.warn('Erro ao salvar log no Supabase:', supLogErr);
+          }
+        }
+
+        // Espelho local
+        db.message_logs.unshift(logEntry);
       }
     }
   }
 
   saveDB(db);
-  return { processed, sent, failed, skipped };
+
+  // Construir mensagem de diagnóstico transparente e detalhada
+  let resultMsg = '';
+  if (total_customers_checked === 0) {
+    resultMsg = 'Nenhum cliente cadastrado foi encontrado para o gestor selecionado.';
+  } else if (eligible_candidates === 0) {
+    const reasonsList: string[] = [];
+    if (skipped_reasons.whatsapp_not_connected) reasonsList.push('WhatsApp desconectado');
+    if (skipped_reasons.auto_billing_disabled) reasonsList.push('cobranças automáticas desativadas');
+    if (skipped_reasons.no_matching_slot_or_time) reasonsList.push('sem vencimentos elegíveis para hoje nos horários programados');
+    if (skipped_reasons.invalid_phone) reasonsList.push('números de telefone inválidos');
+    const reasonsStr = reasonsList.length > 0 ? ` (motivo: ${reasonsList.join(', ')})` : '';
+    resultMsg = `Ciclo executado: ${total_customers_checked} clientes verificados, 0 cobranças elegíveis no momento${reasonsStr}.`;
+  } else {
+    const skipInfo = skipped > 0 ? ` (${skipped} já enviados hoje ou idempotentes)` : '';
+    resultMsg = `Ciclo executado: ${sent} processados pela Evolution API, ${failed} falhas, ${skipped} ignorados${skipInfo}. Total de clientes analisados: ${total_customers_checked} (${eligible_candidates} elegíveis).`;
+  }
+
+  return {
+    total_users_checked,
+    total_customers_checked,
+    eligible_candidates,
+    processed,
+    sent,
+    failed,
+    skipped,
+    skipped_reasons,
+    details,
+    message: resultMsg,
+  };
 }
 
 // Background scheduler interval: runs every 60 seconds
-setInterval(() => {
-  refreshCustomerStatuses();
-  runBillingCycleCheck().catch((err) => {
-    console.error('Error during automated billing cycle:', err);
-  });
-}, 60 * 1000);
+if (process.env.NODE_ENV !== 'test' && !process.env.TEST_RUNNER) {
+  setInterval(() => {
+    refreshCustomerStatuses();
+    runBillingCycleCheck().catch((err) => {
+      console.error('Error during automated billing cycle:', err);
+    });
+  }, 60 * 1000);
+}
 
 // ====================================================================
 // APPLICATION STARTUP & EXPRESS ROUTER
@@ -1858,7 +2156,7 @@ async function startServer() {
   app.get('/api/whatsapp/settings', authenticateUser, async (req, res) => {
     try {
       const user = (req as any).user;
-      const evolution = getActiveEvolutionConfig();
+      const evolution = await getActiveEvolutionConfig();
       const instanceName = getResellerInstanceName(user.id);
 
       let ws: any = null;
@@ -1908,7 +2206,7 @@ async function startServer() {
     try {
       const user = (req as any).user;
       const { auto_billing_enabled } = req.body;
-      const evolution = getActiveEvolutionConfig();
+      const evolution = await getActiveEvolutionConfig();
       const instanceName = getResellerInstanceName(user.id);
       const isEnabled = Boolean(auto_billing_enabled);
 
@@ -1959,7 +2257,7 @@ async function startServer() {
   app.get('/api/whatsapp/instance/status', authenticateUser, async (req, res) => {
     try {
       const user = (req as any).user;
-      const evolution = getActiveEvolutionConfig();
+      const evolution = await getActiveEvolutionConfig();
       const instanceName = getResellerInstanceName(user.id);
 
       let ws: any = null;
@@ -2096,7 +2394,7 @@ async function startServer() {
   app.post('/api/whatsapp/instance/connect', authenticateUser, async (req, res) => {
     try {
       const user = (req as any).user;
-      const evolution = getActiveEvolutionConfig();
+      const evolution = await getActiveEvolutionConfig();
       const instanceName = getResellerInstanceName(user.id);
 
       if (!evolution.isConfigured) {
@@ -2263,7 +2561,7 @@ async function startServer() {
   app.post('/api/whatsapp/instance/disconnect', authenticateUser, async (req, res) => {
     try {
       const user = (req as any).user;
-      const evolution = getActiveEvolutionConfig();
+      const evolution = await getActiveEvolutionConfig();
       const instanceName = getResellerInstanceName(user.id);
       const nowIso = new Date().toISOString();
 
@@ -2312,7 +2610,7 @@ async function startServer() {
   // Verify Evolution API Connection in real time (legacy alias)
   app.post('/api/whatsapp/check-connection', authenticateUser, async (req, res) => {
     const user = (req as any).user;
-    const evolution = getActiveEvolutionConfig();
+    const evolution = await getActiveEvolutionConfig();
     const instanceName = getResellerInstanceName(user.id);
     let ws = db.whatsapp_settings.find((w) => isUserMatch(w.user_id, user));
 
@@ -2395,7 +2693,7 @@ async function startServer() {
       return res.status(400).json({ error: phoneValidation.error });
     }
 
-    const evolution = getActiveEvolutionConfig();
+    const evolution = await getActiveEvolutionConfig();
     if (!evolution.isConfigured) {
       return res.status(400).json({
         error: 'A Evolution API não está configurada centralmente pelo Administrador Master no painel.',
@@ -2514,7 +2812,7 @@ async function startServer() {
       });
     }
 
-    const evolution = getActiveEvolutionConfig();
+    const evolution = await getActiveEvolutionConfig();
     if (!evolution.isConfigured) {
       return res.status(400).json({
         error: 'A Evolution API não está configurada centralmente pelo Administrador Master no painel.',
@@ -2834,13 +3132,19 @@ async function startServer() {
   app.post('/api/billing/trigger-cycle', authenticateUser, requireActiveSubscription, async (req, res) => {
     try {
       const user = (req as any).user;
-      // Reseller can ONLY trigger billing cycle for their own customers!
-      // Admin can trigger for everyone or optionally a specific user via query param
-      const targetUserId = user.role === 'admin' ? (req.query.user_id as string | undefined) : user.id;
-      const result = await runBillingCycleCheck(targetUserId);
+      // Reseller dispara para seus próprios clientes; Admin pode disparar para um gestor específico ou para todos
+      const targetUserId = user.role === 'admin'
+        ? (req.query.user_id ? String(req.query.user_id) : (req.query.all === 'true' ? undefined : user.id))
+        : user.id;
+      const isSimulated = req.query.simulate === 'true' || req.headers['x-simulate-evolution'] === 'true';
+
+      const result = await runBillingCycleCheck(targetUserId, {
+        isManual: true,
+        simulateEvolution: isSimulated,
+      });
       return res.json({
         success: true,
-        message: `Ciclo executado: ${result.sent} processados pela Evolution API, ${result.failed} falhas, ${result.skipped} ignorados/já enviados hoje.`,
+        message: result.message,
         details: result,
       });
     } catch (err: any) {
@@ -2848,11 +3152,24 @@ async function startServer() {
     }
   });
 
-  // 8. MESSAGE LOGS (HISTORY)
-  app.get('/api/billing/logs', authenticateUser, (req, res) => {
-    const user = (req as any).user;
-    const logs = db.message_logs.filter((l) => isUserMatch(l.user_id, user));
-    return res.json(logs);
+  // 8. MESSAGE LOGS (HISTORY - Supabase PostgreSQL como Fonte de Verdade)
+  app.get('/api/billing/logs', authenticateUser, async (req, res) => {
+    try {
+      const user = (req as any).user;
+      let logs: any[] = [];
+      if (isSupabaseServerConfigured && supabaseAdmin && isValidUUID(user.id)) {
+        logs = await getSupabaseMessageLogs(user.role === 'admin' ? undefined : user.id);
+      }
+      if (!logs || logs.length === 0) {
+        logs = db.message_logs.filter((l) => isUserMatch(l.user_id, user));
+      }
+      return res.json(logs);
+    } catch (err: any) {
+      console.warn('Erro ao consultar logs de cobrança no Supabase:', err);
+      const user = (req as any).user;
+      const logs = db.message_logs.filter((l) => isUserMatch(l.user_id, user));
+      return res.json(logs);
+    }
   });
 
   // 9. SAAS SUBSCRIPTION & PAYMENT INFO
@@ -2862,9 +3179,25 @@ async function startServer() {
     const sub = subCheck.subscription || db.subscriptions.find((s) => isUserMatch(s.user_id, user));
     const saas = db.saas_settings;
 
+    let mpConfig: any = { configured: false, enabled: false };
+    let pendingPayment: any = null;
+    try {
+      mpConfig = await getMercadoPagoConfig();
+      pendingPayment = await findRecentPendingPayment(user.id);
+    } catch (e: any) {
+      console.warn('Falha não-bloqueante ao verificar status Mercado Pago:', e?.message);
+    }
+
+    const isLifetime =
+      subCheck.isLifetime ||
+      sub?.notes === 'vitalicio' ||
+      (typeof sub?.payment_reference === 'string' && sub.payment_reference.startsWith('MP_')) ||
+      (sub?.current_period_end && new Date(sub.current_period_end).getFullYear() >= 2090);
+
     return res.json({
       subscription: {
         ...subCheck,
+        isLifetime: Boolean(isLifetime),
         trial_ends_at: sub?.trial_ends_at,
         current_period_end: sub?.current_period_end,
         payment_reference: sub?.payment_reference,
@@ -2874,6 +3207,24 @@ async function startServer() {
         pix_name: saas.admin_pix_name,
         monthly_price: saas.saas_monthly_price,
         instructions: saas.instructions,
+      },
+      mercadopago: {
+        available: Boolean(mpConfig.configured && mpConfig.enabled),
+        price: 99.90,
+        currency: 'BRL',
+        title: 'Licença Vitalícia Gestor FLIX',
+        pending_payment: pendingPayment
+          ? {
+              id: pendingPayment.id,
+              mercado_pago_payment_id: pendingPayment.mercado_pago_payment_id,
+              status: pendingPayment.status,
+              amount: pendingPayment.amount,
+              qr_code: pendingPayment.qr_code,
+              qr_code_base64: pendingPayment.qr_code_base64,
+              ticket_url: pendingPayment.ticket_url,
+              expires_at: pendingPayment.expires_at,
+            }
+          : null,
       },
     });
   });
@@ -3089,9 +3440,9 @@ async function startServer() {
   });
 
   // 11. CENTRAL EVOLUTION API (Exclusive to Master Admin)
-  app.get('/api/admin/evolution/settings', authenticateUser, requireAdmin, (_req, res) => {
+  app.get('/api/admin/evolution/settings', authenticateUser, requireAdmin, async (_req, res) => {
     try {
-      const config = loadEvolutionGlobalConfig();
+      const config = await loadEvolutionGlobalConfigAsync();
       const hasApiKey = Boolean(config.api_key && config.api_key.trim().length > 0);
       return res.json({
         api_url: config.api_url || '',
@@ -3105,12 +3456,12 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/evolution/settings', authenticateUser, requireAdmin, (req, res) => {
+  app.post('/api/admin/evolution/settings', authenticateUser, requireAdmin, async (req, res) => {
     try {
       const user = (req as any).user;
       const { api_url, api_key } = req.body || {};
 
-      const current = loadEvolutionGlobalConfig();
+      const current = await loadEvolutionGlobalConfigAsync();
 
       if (typeof api_url === 'string') {
         const cleanUrl = api_url.trim().replace(/\/+$/, '');
@@ -3131,13 +3482,27 @@ async function startServer() {
       current.updated_at = new Date().toISOString();
       current.updated_by = user?.email || 'admin';
 
+      // 1. Gravação prioritária e persistente no Supabase (compartilhada entre AI Studio e gestorflix.online)
+      if (isSupabaseServerConfigured && supabaseAdmin) {
+        await updateSupabaseCentralEvolutionConfig({
+          api_url: current.api_url,
+          api_key: current.api_key,
+          updated_by: current.updated_by,
+        });
+      }
+
+      // 2. Gravação de espelho local (para compatibilidade e execução offline)
       saveEvolutionGlobalConfig(current);
+
+      // Invalida cache imediato
+      cachedEvolutionConfig = current;
+      lastEvolutionCacheTime = Date.now();
 
       const hasApiKey = Boolean(current.api_key && current.api_key.trim().length > 0);
 
       return res.json({
         success: true,
-        message: 'Configurações centrais da Evolution API salvas com sucesso!',
+        message: 'Configurações centrais da Evolution API salvas com sucesso no Supabase e sincronizadas!',
         settings: {
           api_url: current.api_url,
           has_api_key: hasApiKey,
@@ -3153,7 +3518,7 @@ async function startServer() {
   app.post('/api/admin/evolution/test', authenticateUser, requireAdmin, async (req, res) => {
     try {
       const { api_url, api_key } = req.body || {};
-      const saved = loadEvolutionGlobalConfig();
+      const saved = await loadEvolutionGlobalConfigAsync();
 
       const rawUrl = typeof api_url === 'string' && api_url.trim() ? api_url.trim() : saved.api_url;
       const cleanUrl = (rawUrl || '').replace(/\/+$/, '');
@@ -3176,7 +3541,27 @@ async function startServer() {
         return res.status(400).json({ success: false, error: 'A URL base deve iniciar com http:// ou https://' });
       }
 
-      // Endpoint padrão da Evolution API v1/v2 para listar instâncias com a chave global
+      // 1. Diagnóstico de Saúde / Alcance do Servidor (GET /)
+      let detectedVersion: string | null = null;
+      let isHostOnline = false;
+      try {
+        const rootResponse = await fetch(`${cleanUrl}/`, {
+          method: 'GET',
+          signal: AbortSignal.timeout(6000),
+        });
+        if (rootResponse.ok) {
+          isHostOnline = true;
+          const rootData = await rootResponse.json().catch(() => null);
+          if (rootData && typeof rootData.version === 'string') {
+            detectedVersion = rootData.version;
+          }
+        }
+      } catch (rootErr) {
+        // Host inacessível ou timeout inicial
+      }
+
+      // 2. Consulta de Autenticação e Instâncias (GET /instance/fetchInstances com apikey)
+      // Usamos 30 segundos pois servidores Evolution com dezenas de instâncias ativas levam mais de 10s para responder
       const endpoint = `${cleanUrl}/instance/fetchInstances`;
 
       const response = await fetch(endpoint, {
@@ -3184,7 +3569,7 @@ async function startServer() {
         headers: {
           apikey: testKey,
         },
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(30000),
       });
 
       if (response.ok) {
@@ -3196,17 +3581,18 @@ async function startServer() {
           count = body.instances.length;
         }
 
+        const versionStr = detectedVersion ? ` v${detectedVersion}` : '';
         return res.json({
           success: true,
           status: response.status,
-          message: 'Conexão estabelecida com sucesso com a Evolution API!',
+          message: `Conexão estabelecida com sucesso com a Evolution API${versionStr}! Credencial global validada.`,
           instance_count: count,
         });
       } else if (response.status === 401 || response.status === 403) {
         return res.status(response.status).json({
           success: false,
           status: response.status,
-          error: 'Falha de autenticação: Global API Key inválida ou rejeitada pelo servidor Evolution.',
+          error: `Falha de autenticação (HTTP ${response.status}): Global API Key inválida ou rejeitada pelo servidor Evolution.`,
         });
       } else if (response.status === 404) {
         return res.status(404).json({
@@ -3226,9 +3612,232 @@ async function startServer() {
       return res.status(502).json({
         success: false,
         error: isTimeout
-          ? 'Tempo limite de conexão excedido (10s). Verifique se o servidor Evolution API está online e acessível.'
-          : `Falha ao conectar à Evolution API: ${err.message || 'Erro de rede'}`,
+          ? 'Tempo limite de conexão excedido (30s). O servidor Evolution API respondeu lentamente na listagem de instâncias.'
+          : `Falha ao conectar à Evolution API: ${err.message || 'Erro de rede ou DNS/SSL'}`,
       });
+    }
+  });
+
+  // ====================================================================
+  // MERCADO PAGO INTEGRATION (PIX LIFETIME LICENSE R$ 99,90)
+  // ====================================================================
+
+  // 1. ADMIN: Obter configurações do Mercado Pago (Segurança: restrito ao Master Admin; token mascarado, nunca exposto)
+  app.get('/api/admin/mercadopago/settings', authenticateUser, requireMasterAdmin, async (_req, res) => {
+    try {
+      const config = await getMercadoPagoConfig();
+      return res.json({
+        configured: config.configured,
+        enabled: config.enabled,
+        has_token: config.has_token,
+        masked_token: config.masked_token,
+        notification_url: config.notification_url || config.webhook_url,
+        has_webhook_secret: config.has_webhook_secret,
+        updated_at: config.updated_at,
+      });
+    } catch (err: any) {
+      console.error('Erro ao consultar configurações do Mercado Pago:', err);
+      return res.status(500).json({ error: 'Falha ao recuperar configurações do Mercado Pago' });
+    }
+  });
+
+  // 2. ADMIN: Salvar configurações do Mercado Pago (Segurança: restrito ao Master Admin)
+  app.post('/api/admin/mercadopago/settings', authenticateUser, requireMasterAdmin, async (req, res) => {
+    try {
+      const { access_token, enabled, notification_url, webhook_secret } = req.body || {};
+      const updated = await saveMercadoPagoConfig({
+        access_token: typeof access_token === 'string' ? access_token.trim() : undefined,
+        enabled: typeof enabled === 'boolean' ? enabled : undefined,
+        webhook_url: typeof notification_url === 'string' ? notification_url.trim() : undefined,
+        webhook_secret: typeof webhook_secret === 'string' ? webhook_secret.trim() : undefined,
+      });
+
+      return res.json({
+        success: true,
+        message: 'Configurações do Mercado Pago salvas com sucesso!',
+        config: {
+          configured: updated.configured,
+          enabled: updated.enabled,
+          has_token: Boolean(updated.access_token_masked),
+          masked_token: updated.access_token_masked,
+          notification_url: updated.webhook_url,
+          has_webhook_secret: updated.has_webhook_secret,
+          updated_at: updated.updated_at,
+        },
+      });
+    } catch (err: any) {
+      console.error('Erro ao salvar configurações do Mercado Pago:', err);
+      return res.status(500).json({
+        error: err.message || 'Falha ao salvar configurações do Mercado Pago',
+      });
+    }
+  });
+
+  // 3. ADMIN: Testar conectividade real com a API do Mercado Pago (Segurança: restrito ao Master Admin)
+  app.post('/api/admin/mercadopago/test', authenticateUser, requireMasterAdmin, async (req, res) => {
+    try {
+      const { access_token } = req.body || {};
+      const testResult = await testMercadoPagoConnection(
+        typeof access_token === 'string' && access_token.trim() ? access_token.trim() : undefined
+      );
+
+      if (testResult.success) {
+        return res.json({
+          success: true,
+          status: testResult.status || 200,
+          user_id: testResult.account_id,
+          nickname: testResult.nickname,
+          site_id: testResult.site_id,
+          message: testResult.message,
+        });
+      } else {
+        return res.status(testResult.status && testResult.status < 500 ? testResult.status : 502).json({
+          success: false,
+          status: testResult.status || 502,
+          message: testResult.message,
+        });
+      }
+    } catch (err: any) {
+      return res.status(502).json({
+        success: false,
+        message: `Falha na verificação de conectividade com Mercado Pago: ${err.message || 'Erro inesperado'}`,
+      });
+    }
+  });
+
+  // 4. USUÁRIO: Criar cobrança Pix no valor de R$ 99,90 para Licença Vitalícia
+  app.post('/api/payments/pix', authenticateUser, async (req, res) => {
+    try {
+      const user = (req as any).user;
+      if (!user || !user.id) {
+        return res.status(401).json({ error: 'Usuário não autenticado' });
+      }
+
+      const reqBaseUrl = `${req.protocol}://${req.get('host')}`;
+
+      const result = await createPixCharge({
+        userId: user.id,
+        userEmail: user.email || 'contato@gestorflix.online',
+        userName: user.name || user.email?.split('@')[0] || 'Revendedor Gestor FLIX',
+        serverBaseUrl: reqBaseUrl,
+      });
+
+      const payment = result.payment;
+      return res.json({
+        success: true,
+        payment: {
+          id: payment.id,
+          mercado_pago_payment_id: payment.mercado_pago_payment_id,
+          status: payment.status,
+          amount: payment.amount,
+          currency: payment.currency,
+          qr_code: payment.qr_code,
+          qr_code_base64: payment.qr_code_base64,
+          ticket_url: payment.ticket_url,
+          expires_at: payment.expires_at,
+          created_at: payment.created_at,
+        },
+      });
+    } catch (err: any) {
+      console.error('Erro ao gerar pagamento Pix via Mercado Pago:', err);
+      return res.status(400).json({
+        error: err.message || 'Não foi possível gerar a cobrança Pix no momento.',
+      });
+    }
+  });
+
+  // 5. USUÁRIO: Consultar status de pagamento e acionar sincronização
+  app.get('/api/payments/status/:id', authenticateUser, async (req, res) => {
+    try {
+      const user = (req as any).user;
+      const paymentId = req.params.id;
+
+      let payment = await findPaymentByIdOrMpId(paymentId);
+      if (!payment) {
+        return res.status(404).json({ error: 'Registro de pagamento não localizado' });
+      }
+
+      if (payment.user_id !== user.id && user.role !== 'admin') {
+        return res.status(403).json({ error: 'Acesso negado a este pagamento' });
+      }
+
+      if (payment.status === 'pending' && payment.mercado_pago_payment_id) {
+        const verifyRes = await verifyAndProcessPayment(payment.mercado_pago_payment_id);
+        if (verifyRes.paymentRecord) {
+          payment = verifyRes.paymentRecord;
+        }
+      }
+
+      const isApproved = payment.status === 'approved';
+      return res.json({
+        success: true,
+        payment: {
+          id: payment.id,
+          mercado_pago_payment_id: payment.mercado_pago_payment_id,
+          status: payment.status,
+          amount: payment.amount,
+          is_approved: isApproved,
+          activated: isApproved,
+          paid_at: payment.paid_at || payment.approved_at,
+          expires_at: payment.expires_at,
+        },
+      });
+    } catch (err: any) {
+      console.error('Erro ao verificar status do pagamento:', err);
+      return res.status(500).json({ error: 'Erro ao verificar status do pagamento' });
+    }
+  });
+
+  // 6. WEBHOOK: Recepção pública oficial de notificações do Mercado Pago
+  app.post('/api/webhooks/mercadopago', async (req, res) => {
+    try {
+      const body = req.body || {};
+      const query = req.query || {};
+
+      const paymentId =
+        body?.data?.id ||
+        body?.id ||
+        query?.['data.id'] ||
+        query?.id;
+
+      const eventType = body?.type || body?.action || query?.topic || query?.type || 'unknown';
+
+      // Responde imediatamente com 200 OK
+      res.status(200).json({ received: true, timestamp: new Date().toISOString() });
+
+      if (!paymentId) {
+        return;
+      }
+
+      const xSignature = req.headers['x-signature'] as string | undefined;
+      const xRequestId = req.headers['x-request-id'] as string | undefined;
+      const mpConfig = await getMercadoPagoConfig();
+
+      if (mpConfig.webhook_secret) {
+        const sigResult = verifyMercadoPagoSignature(
+          xSignature,
+          xRequestId,
+          String(paymentId),
+          mpConfig.webhook_secret
+        );
+        if (!sigResult.valid) {
+          console.warn(`[Webhook MP] Assinatura rejeitada (${sigResult.reason}) para pagamento ${paymentId}`);
+          return;
+        }
+      } else {
+        console.warn(`[Webhook MP] Segredo de webhook não configurado no servidor. Prosseguindo com consulta autoritativa direta na API oficial do Mercado Pago para ID ${paymentId}.`);
+      }
+
+      console.log(`[Webhook MP] Processando notificação de pagamento ID: ${paymentId} (${eventType})`);
+      const processResult = await verifyAndProcessPayment(String(paymentId));
+      if (processResult.success && processResult.approved) {
+        console.log(`[Webhook MP] Licença vitalícia ${processResult.alreadyProcessed ? 'confirmada (idempotente)' : 'ativada'} com sucesso para usuário: ${processResult.userId}`);
+      }
+    } catch (err: any) {
+      console.error('[Webhook MP] Erro ao processar webhook Mercado Pago:', err.message);
+      if (!res.headersSent) {
+        res.status(200).json({ received: true, error: err.message });
+      }
     }
   });
 
@@ -3281,7 +3890,9 @@ async function startServer() {
   });
 }
 
-startServer().catch((err) => {
-  console.error('Falha crítica ao iniciar servidor:', err);
-  process.exit(1);
-});
+if (process.env.NODE_ENV !== 'test' && !process.env.TEST_RUNNER) {
+  startServer().catch((err) => {
+    console.error('Falha crítica ao iniciar servidor:', err);
+    process.exit(1);
+  });
+}

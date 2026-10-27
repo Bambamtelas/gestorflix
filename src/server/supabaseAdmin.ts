@@ -1488,3 +1488,200 @@ export async function updateSupabaseMessageTemplate(
   return data as SupabaseMessageTemplate;
 }
 
+// --- CONFIGURAÇÃO CENTRAL DA EVOLUTION API (Master Admin no Supabase) ---
+
+export interface SupabaseCentralEvolutionConfig {
+  api_url: string;
+  api_key: string;
+  updated_at?: string | null;
+  updated_by?: string | null;
+}
+
+/**
+ * Consulta a configuração central da Evolution API gravada no registro do Administrador Master (public.whatsapp_settings).
+ */
+export async function getSupabaseCentralEvolutionConfig(): Promise<SupabaseCentralEvolutionConfig> {
+  const admin = getSupabaseAdmin();
+  const adminEmail = (process.env.ADMIN_EMAIL || 'chavepixedvandyemis@gmail.com').toLowerCase().trim();
+
+  // Localiza perfil do Master Admin
+  const { data: profile } = await admin
+    .from('profiles')
+    .select('id, email, role')
+    .eq('role', 'admin')
+    .maybeSingle();
+
+  const adminUserId = profile?.id || 'ddc2d6ad-f5bc-4e33-8088-6cec514f01c9';
+
+  const { data: ws, error } = await admin
+    .from('whatsapp_settings')
+    .select('api_url, api_key, updated_at')
+    .eq('user_id', adminUserId)
+    .maybeSingle();
+
+  if (error || !ws) {
+    return {
+      api_url: '',
+      api_key: '',
+      updated_at: undefined,
+      updated_by: profile?.email || adminEmail,
+    };
+  }
+
+  const cleanUrl = (ws.api_url || '').trim().replace(/\/+$/, '');
+  const cleanKey = (ws.api_key || '').trim();
+
+  return {
+    api_url: cleanUrl,
+    api_key: cleanKey,
+    updated_at: ws.updated_at,
+    updated_by: profile?.email || adminEmail,
+  };
+}
+
+/**
+ * Grava a configuração central da Evolution API no registro do Administrador Master (public.whatsapp_settings).
+ * Proteção: Apenas campos centrais api_url e api_key são atualizados, sem afetar instâncias de revendedores.
+ */
+export async function updateSupabaseCentralEvolutionConfig(payload: {
+  api_url?: string;
+  api_key?: string;
+  updated_by?: string;
+}): Promise<SupabaseCentralEvolutionConfig> {
+  const admin = getSupabaseAdmin();
+  const adminEmail = (process.env.ADMIN_EMAIL || 'chavepixedvandyemis@gmail.com').toLowerCase().trim();
+
+  const { data: profile } = await admin
+    .from('profiles')
+    .select('id, email, role')
+    .eq('role', 'admin')
+    .maybeSingle();
+
+  const adminUserId = profile?.id || 'ddc2d6ad-f5bc-4e33-8088-6cec514f01c9';
+
+  await ensureSupabaseWhatsAppSettings(adminUserId);
+
+  const updateFields: Record<string, any> = {
+    updated_at: new Date().toISOString(),
+  };
+
+  if (payload.api_url !== undefined) {
+    updateFields.api_url = payload.api_url.trim().replace(/\/+$/, '');
+  }
+  if (payload.api_key !== undefined) {
+    updateFields.api_key = payload.api_key.trim();
+  }
+
+  const { data, error } = await admin
+    .from('whatsapp_settings')
+    .update(updateFields)
+    .eq('user_id', adminUserId)
+    .select('api_url, api_key, updated_at')
+    .single();
+
+  if (error || !data) {
+    throw new Error(`Falha ao persistir configuração central da Evolution API no Supabase: ${error?.message || 'Erro desconhecido'}`);
+  }
+
+  return {
+    api_url: data.api_url,
+    api_key: data.api_key,
+    updated_at: data.updated_at,
+    updated_by: payload.updated_by || profile?.email || adminEmail,
+  };
+}
+
+/**
+ * Consulta o histórico de mensagens / cobranças no Supabase PostgreSQL.
+ */
+export async function getSupabaseMessageLogs(userId?: string): Promise<any[]> {
+  const admin = getSupabaseAdmin();
+  let query = admin
+    .from('message_logs')
+    .select('id, user_id, customer_id, customer_name, whatsapp, message_type, cycle_date, scheduled_for, attempted_at, status, response_payload, error_details, idempotency_key, created_at')
+    .order('created_at', { ascending: false });
+
+  if (userId && isValidUUID(userId)) {
+    query = query.eq('user_id', userId);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    console.warn('Erro ao consultar message_logs no Supabase:', error.message);
+    return [];
+  }
+  return data || [];
+}
+
+/**
+ * Cria ou atualiza um log de envio de mensagem no Supabase com garantia de idempotência.
+ */
+export async function saveSupabaseMessageLog(logEntry: {
+  id?: string;
+  user_id: string;
+  customer_id?: string | null;
+  customer_name: string;
+  whatsapp: string;
+  message_type: string;
+  cycle_date: string;
+  scheduled_for: string;
+  attempted_at?: string;
+  status: 'pending' | 'sent' | 'failed' | 'cancelled';
+  response_payload?: string | null;
+  error_details?: string | null;
+  idempotency_key: string;
+  created_at?: string;
+}): Promise<any> {
+  const admin = getSupabaseAdmin();
+  const id = logEntry.id && isValidUUID(logEntry.id) ? logEntry.id : randomUUID();
+
+  const record: any = {
+    id,
+    user_id: logEntry.user_id,
+    customer_id: logEntry.customer_id && isValidUUID(logEntry.customer_id) ? logEntry.customer_id : null,
+    customer_name: logEntry.customer_name,
+    whatsapp: logEntry.whatsapp,
+    message_type: logEntry.message_type,
+    cycle_date: logEntry.cycle_date,
+    scheduled_for: logEntry.scheduled_for,
+    attempted_at: logEntry.attempted_at || new Date().toISOString(),
+    status: logEntry.status,
+    response_payload: logEntry.response_payload || null,
+    error_details: logEntry.error_details || null,
+    idempotency_key: logEntry.idempotency_key,
+    created_at: logEntry.created_at || new Date().toISOString(),
+  };
+
+  const { data, error } = await admin
+    .from('message_logs')
+    .upsert(record, { onConflict: 'idempotency_key' })
+    .select()
+    .single();
+
+  if (error) {
+    console.warn('Aviso ao gravar message_log no Supabase:', error.message);
+    return record;
+  }
+  return data;
+}
+
+/**
+ * Verifica se já existe um envio com confirmação válida no Supabase para a mesma idempotency_key.
+ * Bloqueia estritamente apenas quando status for 'sent' (confirmado) e não for simulação de teste.
+ */
+export async function checkSupabaseIdempotency(idempotencyKey: string): Promise<boolean> {
+  const admin = getSupabaseAdmin();
+  const { data, error } = await admin
+    .from('message_logs')
+    .select('id, status, response_payload')
+    .eq('idempotency_key', idempotencyKey)
+    .maybeSingle();
+
+  if (error || !data) return false;
+  const isSent = data.status === 'sent';
+  const isSimulated = typeof data.response_payload === 'string' && data.response_payload.includes('"simulated":true');
+  return isSent && !isSimulated;
+}
+
+
+

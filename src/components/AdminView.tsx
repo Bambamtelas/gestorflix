@@ -25,11 +25,14 @@ import {
 
 export const AdminView: React.FC = () => {
   const { user } = useAuth();
+  const isMasterAdmin = Boolean(
+    user?.email && user.email.trim().toLowerCase() === 'chavepixedvandyemis@gmail.com'
+  );
   const [users, setUsers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [adminError, setAdminError] = useState<string>('');
   const [actionSuccess, setActionSuccess] = useState('');
-  const [activeTab, setActiveTab] = useState<'users' | 'evolution' | 'settings' | 'sql'>('users');
+  const [activeTab, setActiveTab] = useState<'users' | 'mercadopago' | 'evolution' | 'settings' | 'sql'>('users');
 
   // License Settings
   const [pixKey, setPixKey] = useState('chavepixedvandyemis@gmail.com');
@@ -37,6 +40,34 @@ export const AdminView: React.FC = () => {
   const [price, setPrice] = useState(99.9);
   const [instructions, setInstructions] = useState('Após realizar o pagamento via PIX no valor de R$ 99,90 (valor único vitalício, sem mensalidade), envie o comprovante para ativação imediata da sua conta.');
   const [savingSettings, setSavingSettings] = useState(false);
+
+  // Mercado Pago Settings (Master Admin)
+  const [mpConfig, setMpConfig] = useState<{
+    configured: boolean;
+    enabled: boolean;
+    has_token: boolean;
+    masked_token: string;
+    notification_url: string;
+    has_webhook_secret: boolean;
+    updated_at?: string;
+  } | null>(null);
+  const [mpToken, setMpToken] = useState('');
+  const [mpEnabled, setMpEnabled] = useState(true);
+  const [mpNotificationUrl, setMpNotificationUrl] = useState('');
+  const [mpWebhookSecret, setMpWebhookSecret] = useState('');
+  const [showMpTokenInput, setShowMpTokenInput] = useState(false);
+  const [showMpSecretInput, setShowMpSecretInput] = useState(false);
+  const [savingMp, setSavingMp] = useState(false);
+  const [testingMp, setTestingMp] = useState(false);
+  const [copiedMpWebhook, setCopiedMpWebhook] = useState(false);
+  const [mpTestResult, setMpTestResult] = useState<{
+    success: boolean;
+    message: string;
+    status?: number;
+    user_id?: number;
+    nickname?: string;
+    site_id?: string;
+  } | null>(null);
 
   // Evolution Central Settings (Master Admin)
   const [evolutionUrl, setEvolutionUrl] = useState('');
@@ -83,6 +114,18 @@ export const AdminView: React.FC = () => {
         .then((res) => res.text())
         .then((txt) => setSqlContent(txt))
         .catch(() => {});
+
+      // Fetch Mercado Pago Settings (exclusivo para o Master Admin)
+      if (isMasterAdmin) {
+        try {
+          const mpSettings = await api.getAdminMercadoPagoSettings();
+          setMpConfig(mpSettings);
+          setMpEnabled(Boolean(mpSettings.enabled));
+          setMpNotificationUrl(mpSettings.notification_url || `${window.location.origin}/api/webhooks/mercadopago`);
+        } catch (mpErr) {
+          console.warn('Configurações do Mercado Pago não puderam ser carregadas:', mpErr);
+        }
+      }
 
       // Fetch Central Evolution API Settings
       try {
@@ -155,6 +198,58 @@ export const AdminView: React.FC = () => {
       setSqlCopied(true);
       setTimeout(() => setSqlCopied(false), 3000);
     }
+  };
+
+  const handleSaveMercadoPago = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSavingMp(true);
+    try {
+      const res = await api.saveAdminMercadoPagoSettings({
+        access_token: mpToken ? mpToken.trim() : undefined,
+        enabled: mpEnabled,
+        notification_url: mpNotificationUrl ? mpNotificationUrl.trim() : undefined,
+        webhook_secret: mpWebhookSecret ? mpWebhookSecret.trim() : undefined,
+      });
+      setMpConfig(res.config);
+      setMpEnabled(res.config.enabled);
+      setMpNotificationUrl(res.config.notification_url);
+      setMpToken('');
+      setMpWebhookSecret('');
+      setShowMpTokenInput(false);
+      setShowMpSecretInput(false);
+      setActionSuccess('Configurações do Mercado Pago salvas com sucesso!');
+      setTimeout(() => setActionSuccess(''), 4000);
+    } catch (err: any) {
+      alert(err.message || 'Erro ao salvar configurações do Mercado Pago.');
+    } finally {
+      setSavingMp(false);
+    }
+  };
+
+  const handleTestMercadoPago = async () => {
+    setTestingMp(true);
+    setMpTestResult(null);
+    try {
+      const res = await api.testAdminMercadoPagoConnection({
+        access_token: mpToken ? mpToken.trim() : undefined,
+      });
+      setMpTestResult(res);
+    } catch (err: any) {
+      setMpTestResult({
+        success: false,
+        message: err.message || 'Falha ao testar conexão com o Mercado Pago.',
+        status: err.status,
+      });
+    } finally {
+      setTestingMp(false);
+    }
+  };
+
+  const handleCopyWebhookUrl = () => {
+    const url = mpNotificationUrl || `${window.location.origin}/api/webhooks/mercadopago`;
+    navigator.clipboard.writeText(url);
+    setCopiedMpWebhook(true);
+    setTimeout(() => setCopiedMpWebhook(false), 3000);
   };
 
   const handleSaveEvolution = async (e: React.FormEvent) => {
@@ -302,6 +397,17 @@ export const AdminView: React.FC = () => {
           <Users className="w-3.5 h-3.5" />
           Usuários & Licenças
         </button>
+        {isMasterAdmin && (
+          <button
+            onClick={() => setActiveTab('mercadopago')}
+            className={`px-4 py-2 font-bold rounded-lg transition-colors flex items-center gap-1.5 ${
+              activeTab === 'mercadopago' ? 'bg-[#E50914] text-white shadow-md' : 'text-neutral-400 hover:text-white'
+            }`}
+          >
+            <CreditCard className="w-3.5 h-3.5" />
+            Pagamentos e Mercado Pago
+          </button>
+        )}
         <button
           onClick={() => setActiveTab('evolution')}
           className={`px-4 py-2 font-bold rounded-lg transition-colors flex items-center gap-1.5 ${
@@ -468,6 +574,291 @@ export const AdminView: React.FC = () => {
                   })}
                 </tbody>
               </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Tab: Pagamentos e Mercado Pago (Licença Vitalícia Pix R$ 99,90) - Exclusivo Master Admin */}
+      {activeTab === 'mercadopago' && isMasterAdmin && (
+        <div className="p-6 rounded-xl bg-[#181818] border border-[#282828] max-w-3xl space-y-6 text-xs shadow-xl">
+          {/* Header */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#282828] pb-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400">
+                <CreditCard className="w-5 h-5" />
+              </div>
+              <div>
+                <h2 className="text-base font-black text-white">Pagamentos e Mercado Pago</h2>
+                <p className="text-neutral-400 mt-0.5">
+                  Integração oficial Pix Mercado Pago para venda da Licença Vitalícia do Gestor FLIX (R$ 99,90).
+                </p>
+              </div>
+            </div>
+            {mpConfig?.updated_at && (
+              <span className="text-[11px] text-neutral-400 font-mono self-start sm:self-auto bg-[#101010] px-2.5 py-1 rounded-md border border-[#282828]">
+                Atualizado: {new Date(mpConfig.updated_at).toLocaleString('pt-BR')}
+              </span>
+            )}
+          </div>
+
+          {/* Security & Commercial Rules Banner */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="p-4 rounded-xl bg-gradient-to-r from-emerald-950/40 to-[#101010] border border-emerald-500/30 text-neutral-300 space-y-1.5">
+              <div className="flex items-center gap-2 text-emerald-400 font-bold text-xs">
+                <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                <span>Segurança e Credenciais Restritas</span>
+              </div>
+              <p className="text-[11px] text-neutral-400 leading-relaxed">
+                O <strong>Access Token</strong> é armazenado exclusivamente no servidor backend. Revendedores e usuários comuns <strong>nunca</strong> visualizam suas credenciais ou configurações financeiras.
+              </p>
+            </div>
+
+            <div className="p-4 rounded-xl bg-[#121212] border border-[#282828] text-neutral-300 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] uppercase font-bold text-neutral-400 tracking-wider">Regra Comercial</span>
+                <span className="px-2 py-0.5 rounded text-[10px] font-black bg-emerald-950 text-emerald-400 border border-emerald-500/30">
+                  R$ 99,90 Vitalício
+                </span>
+              </div>
+              <p className="text-[11px] text-neutral-400 leading-relaxed">
+                Pagamento único via Pix, sem mensalidades e sem renovação automática. A ativação vitalícia é liberada instantaneamente após confirmação autêntica do Mercado Pago.
+              </p>
+            </div>
+          </div>
+
+          <form onSubmit={handleSaveMercadoPago} className="space-y-5">
+            {/* Enable / Disable Gateway Toggle */}
+            <div className="p-4 rounded-xl bg-[#141414] border border-[#262626] flex items-center justify-between">
+              <div>
+                <label className="font-bold text-white block text-sm">Disponibilidade de Pagamentos</label>
+                <p className="text-[11px] text-neutral-400 mt-0.5">
+                  Permitir que usuários e revendedores comprem a licença vitalícia via Pix no sistema.
+                </p>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={mpEnabled}
+                  onChange={(e) => setMpEnabled(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-[#2a2a2a] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-emerald-600"></div>
+              </label>
+            </div>
+
+            {/* Access Token Input */}
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="font-semibold text-neutral-200 flex items-center gap-1.5">
+                  <Key className="w-3.5 h-3.5 text-neutral-400" />
+                  <span>Access Token do Mercado Pago (Produção)</span>
+                </label>
+                {mpConfig?.configured && !showMpTokenInput && (
+                  <span className="text-[10px] font-mono text-emerald-400 bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-500/30 flex items-center gap-1">
+                    <CheckCircle2 className="w-3 h-3" /> Token Configurado com Segurança
+                  </span>
+                )}
+              </div>
+
+              {mpConfig?.configured && !showMpTokenInput ? (
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 bg-[#101010] border border-[#282828] rounded-lg px-3.5 py-2.5 font-mono text-neutral-300 text-xs flex items-center justify-between">
+                    <span>{mpConfig.masked_token}</span>
+                    <span className="text-[10px] text-neutral-400 uppercase font-bold">Oculto</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowMpTokenInput(true);
+                      setMpToken('');
+                    }}
+                    className="px-3.5 py-2.5 bg-[#222222] hover:bg-[#2c2c2c] text-white rounded-lg border border-[#333333] transition-colors font-semibold text-xs whitespace-nowrap"
+                  >
+                    Alterar Token
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-neutral-400">
+                      <Key className="w-4 h-4" />
+                    </div>
+                    <input
+                      type="password"
+                      value={mpToken}
+                      onChange={(e) => setMpToken(e.target.value)}
+                      placeholder="APP_USR-0000000000000000-000000-..."
+                      className="w-full bg-[#101010] border border-[#333333] focus:border-emerald-500 focus:outline-none rounded-lg pl-9 pr-10 py-2.5 text-white placeholder-neutral-600 font-mono text-xs transition-colors"
+                      required={!mpConfig?.configured}
+                    />
+                  </div>
+                  {showMpTokenInput && (
+                    <button
+                      type="button"
+                      onClick={() => setShowMpTokenInput(false)}
+                      className="text-[10px] text-neutral-400 hover:text-white underline"
+                    >
+                      Cancelar alteração e manter o token atual
+                    </button>
+                  )}
+                </div>
+              )}
+              <p className="text-[10px] text-neutral-400 mt-1">
+                Obtenha seu Access Token de Produção no portal de Desenvolvedores do Mercado Pago (Suas Aplicações &gt; Credenciais de Produção).
+              </p>
+            </div>
+
+            {/* Webhook Notification URL */}
+            <div>
+              <label className="block font-semibold text-neutral-200 mb-1.5 flex items-center justify-between">
+                <span>URL de Notificação Instantânea (Webhook)</span>
+                <span className="text-[10px] text-neutral-400">Recebe a confirmação automática do Pix</span>
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={mpNotificationUrl}
+                  onChange={(e) => setMpNotificationUrl(e.target.value)}
+                  placeholder="https://gestorflix.online/api/webhooks/mercadopago"
+                  className="flex-1 bg-[#101010] border border-[#333333] focus:border-emerald-500 focus:outline-none rounded-lg px-3 py-2 text-white placeholder-neutral-600 font-mono text-xs transition-colors"
+                />
+                <button
+                  type="button"
+                  onClick={handleCopyWebhookUrl}
+                  className="px-3.5 py-2 bg-[#222222] hover:bg-[#2c2c2c] text-neutral-200 hover:text-white rounded-lg border border-[#333333] transition-colors flex items-center gap-1.5 font-semibold text-xs whitespace-nowrap"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  {copiedMpWebhook ? 'Copiado!' : 'Copiar URL'}
+                </button>
+              </div>
+              <p className="text-[10px] text-neutral-400 mt-1">
+                Configure esta URL no painel Mercado Pago em <strong>Notificações Webhooks</strong> para o evento <strong>Pagamentos (payments)</strong>.
+              </p>
+            </div>
+
+            {/* Optional Webhook Secret */}
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="font-semibold text-neutral-200 flex items-center gap-1.5">
+                  <Lock className="w-3.5 h-3.5 text-neutral-400" />
+                  <span>Segredo de Assinatura do Webhook (Opcional - Validação HMAC)</span>
+                </label>
+                {mpConfig?.has_webhook_secret && !showMpSecretInput && (
+                  <span className="text-[10px] font-mono text-neutral-400 bg-[#151515] px-2 py-0.5 rounded border border-[#282828]">
+                    Chave secreta configurada
+                  </span>
+                )}
+              </div>
+              {mpConfig?.has_webhook_secret && !showMpSecretInput ? (
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 bg-[#101010] border border-[#282828] rounded-lg px-3 py-2 font-mono text-neutral-400 text-xs">
+                    ••••••••••••••••••••••••••••••••
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowMpSecretInput(true);
+                      setMpWebhookSecret('');
+                    }}
+                    className="px-3 py-2 bg-[#222222] hover:bg-[#2c2c2c] text-white rounded-lg border border-[#333333] transition-colors font-semibold text-xs whitespace-nowrap"
+                  >
+                    Alterar Segredo
+                  </button>
+                </div>
+              ) : (
+                <input
+                  type="text"
+                  value={mpWebhookSecret}
+                  onChange={(e) => setMpWebhookSecret(e.target.value)}
+                  placeholder="Cole aqui o Segredo de Assinatura fornecido pelo Mercado Pago"
+                  className="w-full bg-[#101010] border border-[#333333] focus:border-emerald-500 focus:outline-none rounded-lg px-3 py-2 text-white placeholder-neutral-600 font-mono text-xs transition-colors"
+                />
+              )}
+            </div>
+
+            {/* Actions: Save & Test */}
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-3 border-t border-[#282828]">
+              <button
+                type="button"
+                onClick={handleTestMercadoPago}
+                disabled={testingMp || (!mpConfig?.configured && !mpToken)}
+                className="px-4 py-2.5 bg-[#202020] hover:bg-[#2a2a2a] disabled:opacity-50 text-white rounded-lg font-bold border border-[#383838] transition-colors flex items-center justify-center gap-2"
+              >
+                {testingMp ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+                    <span>Testando Conexão Real com MP...</span>
+                  </>
+                ) : (
+                  <>
+                    <Activity className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Testar Conexão com Mercado Pago</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="submit"
+                disabled={savingMp}
+                className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-lg font-bold shadow-lg shadow-emerald-950/50 transition-colors flex items-center justify-center gap-2"
+              >
+                {savingMp ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Salvando...</span>
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>Salvar Configurações</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </form>
+
+          {/* Test Result Diagnostic Card */}
+          {mpTestResult && (
+            <div
+              className={`p-4 rounded-xl border text-xs space-y-2 ${
+                mpTestResult.success
+                  ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
+                  : 'bg-red-950/50 border-red-500/40 text-red-200'
+              }`}
+            >
+              <div className="flex items-center gap-2 font-bold">
+                {mpTestResult.success ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                )}
+                <span>
+                  {mpTestResult.success ? 'Conexão Real Estabelecida com Sucesso' : 'Falha na Conexão com Mercado Pago'}
+                </span>
+                {mpTestResult.status && (
+                  <span className="ml-auto font-mono text-[10px] px-2 py-0.5 rounded bg-black/40 border border-white/10">
+                    HTTP {mpTestResult.status}
+                  </span>
+                )}
+              </div>
+              <p className="text-[11px] leading-relaxed text-neutral-300">{mpTestResult.message}</p>
+              {mpTestResult.success && mpTestResult.nickname && (
+                <div className="pt-2 border-t border-emerald-500/20 grid grid-cols-2 sm:grid-cols-3 gap-2 text-[10px] font-mono text-neutral-400">
+                  <div>
+                    <span className="block text-neutral-400">Conta:</span>
+                    <span className="text-white font-bold">{mpTestResult.nickname}</span>
+                  </div>
+                  <div>
+                    <span className="block text-neutral-400">Site ID:</span>
+                    <span className="text-white font-bold">{mpTestResult.site_id || 'MLB'}</span>
+                  </div>
+                  <div>
+                    <span className="block text-neutral-400">User ID:</span>
+                    <span className="text-white font-bold">{mpTestResult.user_id}</span>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

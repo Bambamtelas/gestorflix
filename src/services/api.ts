@@ -332,6 +332,13 @@ export const api = {
       monthly_price: number;
       instructions: string;
     };
+    mercadopago?: {
+      available: boolean;
+      price: number;
+      currency: string;
+      title: string;
+      pending_payment: any;
+    };
   }> {
     return request('/api/subscription/info');
   },
@@ -407,5 +414,97 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data || {}),
     });
+  },
+
+  // ====================================================================
+  // MERCADO PAGO INTEGRATION (PIX LIFETIME LICENSE)
+  // ====================================================================
+
+  // Admin: Get Mercado Pago configuration (token is masked, never leaked)
+  async getAdminMercadoPagoSettings(): Promise<{
+    configured: boolean;
+    enabled: boolean;
+    has_token: boolean;
+    masked_token: string;
+    notification_url: string;
+    has_webhook_secret: boolean;
+    updated_at?: string;
+  }> {
+    return request('/api/admin/mercadopago/settings');
+  },
+
+  // Admin: Save Mercado Pago configuration
+  async saveAdminMercadoPagoSettings(data: {
+    access_token?: string;
+    enabled?: boolean;
+    notification_url?: string;
+    webhook_secret?: string;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    config: {
+      configured: boolean;
+      enabled: boolean;
+      has_token: boolean;
+      masked_token: string;
+      notification_url: string;
+      has_webhook_secret: boolean;
+      updated_at?: string;
+    };
+  }> {
+    return request('/api/admin/mercadopago/settings', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  // Admin: Test Mercado Pago connection
+  async testAdminMercadoPagoConnection(data?: {
+    access_token?: string;
+  }): Promise<{
+    success: boolean;
+    message: string;
+    user_id?: number;
+    nickname?: string;
+    site_id?: string;
+    status?: number;
+  }> {
+    return request('/api/admin/mercadopago/test', {
+      method: 'POST',
+      body: JSON.stringify(data || {}),
+    });
+  },
+
+  // User: Create Pix payment charge (R$ 99.90 lifetime)
+  async createPixPayment(): Promise<{
+    success: boolean;
+    payment: {
+      id: string;
+      mercado_pago_payment_id?: string;
+      status: string;
+      amount: number;
+      qr_code: string;
+      qr_code_base64?: string;
+      ticket_url?: string;
+      expires_at?: string;
+    };
+  }> {
+    return request('/api/payments/pix', {
+      method: 'POST',
+    });
+  },
+
+  // User: Poll Pix payment status
+  async getPaymentStatus(paymentId: string): Promise<{
+    success: boolean;
+    payment: {
+      id: string;
+      mercado_pago_payment_id?: string;
+      status: string;
+      is_approved: boolean;
+      activated: boolean;
+    };
+  }> {
+    return request(`/api/payments/status/${encodeURIComponent(paymentId)}`);
   },
 };

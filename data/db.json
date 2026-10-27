@@ -35,6 +35,17 @@
       "current_period_end": "2026-10-29T14:49:18.197Z",
       "created_at": "2026-10-23T14:49:18.197Z",
       "updated_at": "2026-10-23T14:49:47.577Z"
+    },
+    {
+      "id": "8060558b-75c7-4566-b581-186b433e68ef",
+      "user_id": "3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e",
+      "status": "trial",
+      "trial_ends_at": "2026-10-27T13:53:18.339664+00:00",
+      "current_period_end": "2026-10-27T13:53:18.339664+00:00",
+      "payment_reference": null,
+      "notes": null,
+      "created_at": "2026-10-24T13:53:18.339664+00:00",
+      "updated_at": "2026-10-24T13:53:18.339664+00:00"
     }
   ],
   "plans": [
@@ -238,7 +249,68 @@
       "updated_at": "2026-10-23T14:49:18.197Z"
     }
   ],
-  "message_logs": [],
+  "message_logs": [
+    {
+      "id": "log-1793107566939-huek",
+      "user_id": "3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e",
+      "customer_id": "767edf54-3464-4ddf-8e74-973baf80cf89",
+      "customer_name": "Edvan",
+      "whatsapp": "5585996079396",
+      "message_type": "day_before",
+      "cycle_date": "2026-10-28",
+      "scheduled_for": "2026-10-27 10:02",
+      "attempted_at": "2026-10-27T13:26:06.939Z",
+      "status": "sent",
+      "idempotency_key": "3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e_767edf54-3464-4ddf-8e74-973baf80cf89_2026-10-28_day_before",
+      "created_at": "2026-10-27T13:26:06.939Z",
+      "response_payload": "{\"simulated\":true,\"success\":true}"
+    },
+    {
+      "id": "log-1793107566254-6etv",
+      "user_id": "3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e",
+      "customer_id": "3cc4463d-316f-4671-a9f9-f278f07d1868",
+      "customer_name": "bamabam",
+      "whatsapp": "5585996079396",
+      "message_type": "day_of_night",
+      "cycle_date": "2026-10-27",
+      "scheduled_for": "2026-10-27 19:00",
+      "attempted_at": "2026-10-27T13:26:06.254Z",
+      "status": "sent",
+      "idempotency_key": "3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e_3cc4463d-316f-4671-a9f9-f278f07d1868_2026-10-27_day_of_night",
+      "created_at": "2026-10-27T13:26:06.255Z",
+      "response_payload": "{\"simulated\":true,\"success\":true}"
+    },
+    {
+      "id": "log-1793107565867-s6yb",
+      "user_id": "3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e",
+      "customer_id": "3cc4463d-316f-4671-a9f9-f278f07d1868",
+      "customer_name": "bamabam",
+      "whatsapp": "5585996079396",
+      "message_type": "day_of_morning",
+      "cycle_date": "2026-10-27",
+      "scheduled_for": "2026-10-27 10:02",
+      "attempted_at": "2026-10-27T13:26:05.867Z",
+      "status": "sent",
+      "idempotency_key": "3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e_3cc4463d-316f-4671-a9f9-f278f07d1868_2026-10-27_day_of_morning",
+      "created_at": "2026-10-27T13:26:05.867Z",
+      "response_payload": "{\"simulated\":true,\"success\":true}"
+    },
+    {
+      "id": "log-1793107565107-5fau",
+      "user_id": "3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e",
+      "customer_id": "8ae55c90-880d-4139-aacb-485f8539766a",
+      "customer_name": "rael james",
+      "whatsapp": "558596079396",
+      "message_type": "day_after",
+      "cycle_date": "2026-10-26",
+      "scheduled_for": "2026-10-27 10:02",
+      "attempted_at": "2026-10-27T13:26:05.107Z",
+      "status": "sent",
+      "idempotency_key": "3a4a0f08-1bff-41f6-9b57-5c142a3e1f9e_8ae55c90-880d-4139-aacb-485f8539766a_2026-10-26_day_after",
+      "created_at": "2026-10-27T13:26:05.107Z",
+      "response_payload": "{\"simulated\":true,\"success\":true}"
+    }
+  ],
   "saas_settings": {
     "admin_pix_key": "chavepixedvandyemis@gmail.com",
     "admin_pix_name": "Administração Gestor IPTV",

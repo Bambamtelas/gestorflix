@@ -310,3 +310,55 @@ CREATE INDEX IF NOT EXISTS idx_customers_user_exp ON public.customers (user_id, 
 CREATE INDEX IF NOT EXISTS idx_message_logs_idempotency ON public.message_logs (idempotency_key);
 CREATE INDEX IF NOT EXISTS idx_message_logs_user_status ON public.message_logs (user_id, status);
 
+-- 12. TABELA DE PAGAMENTOS MERCADO PAGO COM LICENÇA VITALÍCIA (payments)
+-- Histórico preservado com ON DELETE SET NULL se conta for removida
+CREATE TABLE IF NOT EXISTS public.payments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+  external_reference TEXT NOT NULL UNIQUE,
+  mercado_pago_payment_id TEXT UNIQUE,
+  amount NUMERIC(10, 2) NOT NULL DEFAULT 99.90,
+  currency TEXT NOT NULL DEFAULT 'BRL',
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'cancelled', 'refunded')),
+  license_type TEXT NOT NULL DEFAULT 'vitalicio',
+  qr_code TEXT,
+  qr_code_base64 TEXT,
+  ticket_url TEXT,
+  payer_email TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+  approved_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_payments_user_id ON public.payments(user_id);
+CREATE INDEX IF NOT EXISTS idx_payments_mp_id ON public.payments(mercado_pago_payment_id);
+CREATE INDEX IF NOT EXISTS idx_payments_ext_ref ON public.payments(external_reference);
+CREATE INDEX IF NOT EXISTS idx_payments_status ON public.payments(status);
+
+ALTER TABLE public.payments ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users can view own payments" ON public.payments;
+CREATE POLICY "Users can view own payments" ON public.payments
+  FOR SELECT
+  TO authenticated
+  USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Admins can view all payments" ON public.payments;
+DROP POLICY IF EXISTS "Admins can manage payments" ON public.payments;
+CREATE POLICY "Admins can view all payments" ON public.payments
+  FOR SELECT
+  TO authenticated
+  USING (public.is_admin());
+
+-- 13. TABELA DE SEGREDOS ADMINISTRATIVOS DO BACKEND (admin_secrets)
+-- Totalmente isolada de saas_settings (que é legível por revendedores)
+CREATE TABLE IF NOT EXISTS public.admin_secrets (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now())
+);
+
+ALTER TABLE public.admin_secrets ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.admin_secrets FROM anon, authenticated;
+
+
