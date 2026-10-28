@@ -173,26 +173,45 @@ export async function getMercadoPagoConfig(): Promise<MercadoPagoConfig> {
     effectiveSecret = envSecret;
     effectiveEnabled = envEnabled;
     source = 'env';
-  } else if (dbConfig && dbConfig.access_token) {
-    effectiveToken = dbConfig.access_token;
-    effectiveSecret = dbConfig.webhook_secret || '';
-    effectiveEnabled = typeof dbConfig.enabled === 'boolean' ? dbConfig.enabled : true;
-    effectiveWebhookUrl = dbConfig.webhook_url || '';
-    effectiveUpdatedAt = dbConfig.updated_at || null;
-    source = 'supabase_admin_secrets';
-  } else if (fileConfig && fileConfig.access_token) {
-    effectiveToken = fileConfig.access_token;
-    effectiveSecret = fileConfig.webhook_secret || '';
-    effectiveEnabled = typeof fileConfig.enabled === 'boolean' ? fileConfig.enabled : Boolean(effectiveToken);
-    effectiveWebhookUrl = fileConfig.webhook_url || '';
-    effectiveUpdatedAt = fileConfig.updated_at || null;
-    source = 'file';
   } else {
-    effectiveToken = fileConfig.access_token || '';
-    effectiveSecret = fileConfig.webhook_secret || '';
-    effectiveEnabled = typeof fileConfig.enabled === 'boolean' ? fileConfig.enabled : Boolean(effectiveToken);
-    effectiveWebhookUrl = fileConfig.webhook_url || '';
-    effectiveUpdatedAt = fileConfig.updated_at || null;
+    const hasDbToken = Boolean(dbConfig && dbConfig.access_token);
+    const hasFileToken = Boolean(fileConfig && fileConfig.access_token);
+
+    // Se ambos tiverem token, escolhe a configuração com updated_at mais recente
+    let preferDb = hasDbToken;
+    if (hasDbToken && hasFileToken) {
+      const dbTime = dbConfig?.updated_at ? new Date(dbConfig.updated_at).getTime() : 0;
+      const fileTime = fileConfig?.updated_at ? new Date(fileConfig.updated_at).getTime() : 0;
+      const validDbTime = Number.isFinite(dbTime) ? dbTime : 0;
+      const validFileTime = Number.isFinite(fileTime) ? fileTime : 0;
+      if (validDbTime > 0 || validFileTime > 0) {
+        preferDb = validDbTime >= validFileTime;
+      }
+    } else if (!hasDbToken && hasFileToken) {
+      preferDb = false;
+    }
+
+    if (preferDb && dbConfig) {
+      effectiveToken = dbConfig.access_token || '';
+      effectiveSecret = dbConfig.webhook_secret || '';
+      effectiveEnabled = typeof dbConfig.enabled === 'boolean' ? dbConfig.enabled : true;
+      effectiveWebhookUrl = dbConfig.webhook_url || '';
+      effectiveUpdatedAt = dbConfig.updated_at || null;
+      source = 'supabase_admin_secrets';
+    } else if (hasFileToken && fileConfig) {
+      effectiveToken = fileConfig.access_token || '';
+      effectiveSecret = fileConfig.webhook_secret || '';
+      effectiveEnabled = typeof fileConfig.enabled === 'boolean' ? fileConfig.enabled : Boolean(effectiveToken);
+      effectiveWebhookUrl = fileConfig.webhook_url || '';
+      effectiveUpdatedAt = fileConfig.updated_at || null;
+      source = 'file';
+    } else {
+      effectiveToken = dbConfig?.access_token || fileConfig?.access_token || '';
+      effectiveSecret = dbConfig?.webhook_secret || fileConfig?.webhook_secret || '';
+      effectiveEnabled = typeof fileConfig?.enabled === 'boolean' ? fileConfig.enabled : Boolean(effectiveToken);
+      effectiveWebhookUrl = fileConfig?.webhook_url || dbConfig?.webhook_url || '';
+      effectiveUpdatedAt = fileConfig?.updated_at || dbConfig?.updated_at || null;
+    }
   }
 
   return {
@@ -290,6 +309,24 @@ export async function saveMercadoPagoConfig(payload: {
  * Teste seguro de conectividade com a API oficial do Mercado Pago (GET /v1/users/me).
  * Não expõe segredos.
  */
+/**
+ * Sanitiza objetos de resposta para log diagnóstico, eliminando segredos e dados pessoais
+ */
+function sanitizeDiagnosticBody(data: any): any {
+  if (!data || typeof data !== 'object') return data;
+  if (Array.isArray(data)) {
+    return `Array com ${data.length} itens`;
+  }
+  const safe: Record<string, any> = {};
+  for (const [k, v] of Object.entries(data)) {
+    if (['token', 'access_token', 'authorization', 'email', 'first_name', 'last_name', 'phone', 'address'].includes(k.toLowerCase())) {
+      continue;
+    }
+    safe[k] = v;
+  }
+  return safe;
+}
+
 export async function testMercadoPagoConnection(tokenToTest?: string): Promise<{
   success: boolean;
   status: number;
@@ -297,11 +334,14 @@ export async function testMercadoPagoConnection(tokenToTest?: string): Promise<{
   account_id?: string | number;
   nickname?: string;
   site_id?: string;
+  failed_endpoint?: string;
+  error_details?: string;
 }> {
   const cfg = await getMercadoPagoConfig();
   const rawToken = tokenToTest && !tokenToTest.includes('••••') ? tokenToTest.trim() : cfg.access_token;
+  const cleanToken = (rawToken || '').replace(/["'\r\n\t]/g, '').trim();
 
-  if (!rawToken) {
+  if (!cleanToken) {
     return {
       success: false,
       status: 400,
@@ -310,39 +350,119 @@ export async function testMercadoPagoConnection(tokenToTest?: string): Promise<{
   }
 
   try {
-    const res = await fetch('https://api.mercadopago.com/users/me', {
+    // 1. Tenta obter dados da conta via /users/me
+    let accountData: any = null;
+    let usersMeStatus = 0;
+    let usersMeErrorBody: any = null;
+
+    try {
+      const userRes = await fetch('https://api.mercadopago.com/users/me', {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${cleanToken}`,
+          Accept: 'application/json',
+        },
+        signal: AbortSignal.timeout(10000),
+      });
+      usersMeStatus = userRes.status;
+      const userBody = await userRes.json().catch(() => null);
+
+      if (userRes.ok && userBody) {
+        accountData = userBody;
+        console.log(`[MercadoPago Diagnóstico] GET /users/me sucesso HTTP ${usersMeStatus}`);
+      } else {
+        usersMeErrorBody = userBody;
+        console.log(
+          `[MercadoPago Diagnóstico] GET /users/me retornou HTTP ${usersMeStatus}:`,
+          sanitizeDiagnosticBody(usersMeErrorBody)
+        );
+      }
+    } catch (userErr: any) {
+      console.warn(`[MercadoPago Diagnóstico] Falha de conexão em GET /users/me: ${userErr.message}`);
+    }
+
+    if (accountData && (accountData.id || accountData.nickname)) {
+      return {
+        success: true,
+        status: 200,
+        message: `Conexão estabelecida com sucesso com a API do Mercado Pago! Conta identificada: ${accountData.nickname || accountData.id}.`,
+        account_id: accountData.id,
+        nickname: accountData.nickname,
+        site_id: accountData.site_id,
+      };
+    }
+
+    // 2. Se /users/me retornou 403 (comum em credenciais de Checkout Transparente) ou 404,
+    // valida diretamente no gateway de pagamentos (/v1/payment_methods)
+    console.log(`[MercadoPago Diagnóstico] /users/me indisponível (HTTP ${usersMeStatus}). Acionando validação via /v1/payment_methods...`);
+
+    const pmRes = await fetch('https://api.mercadopago.com/v1/payment_methods', {
       method: 'GET',
       headers: {
-        Authorization: `Bearer ${rawToken}`,
+        Authorization: `Bearer ${cleanToken}`,
+        Accept: 'application/json',
       },
       signal: AbortSignal.timeout(12000),
     });
 
-    if (res.ok) {
-      const data = await res.json();
+    const pmStatus = pmRes.status;
+    const pmBody = await pmRes.json().catch(() => null);
+
+    if (pmRes.ok) {
+      const pmData = Array.isArray(pmBody) ? pmBody : [];
+      const hasPix = pmData.some((m: any) => m.id === 'pix');
+      const pixStatusMsg = hasPix ? 'Método Pix verificado e ativo.' : 'Gateway de pagamentos conectado.';
+      console.log(`[MercadoPago Diagnóstico] GET /v1/payment_methods sucesso HTTP 200 (${pmData.length} métodos, Pix: ${hasPix})`);
+
       return {
         success: true,
         status: 200,
-        message: `Conexão estabelecida com sucesso com a API do Mercado Pago! Conta identificada: ${data.nickname || data.id}.`,
-        account_id: data.id,
-        nickname: data.nickname,
-        site_id: data.site_id,
-      };
-    } else if (res.status === 401 || res.status === 403) {
-      return {
-        success: false,
-        status: res.status,
-        message: 'Credencial inválida ou sem permissão (HTTP 401/403). Verifique o Access Token de Produção no portal de Desenvolvedores do Mercado Pago.',
-      };
-    } else {
-      return {
-        success: false,
-        status: res.status,
-        message: `O servidor do Mercado Pago retornou HTTP ${res.status}.`,
+        message: `Conexão estabelecida com sucesso com a API de Pagamentos do Mercado Pago! ${pixStatusMsg}`,
+        nickname: accountData?.nickname || 'Produção (Checkout)',
+        site_id: accountData?.site_id || 'MLB',
       };
     }
+
+    // Log de diagnóstico higienizado do erro retornado por /v1/payment_methods
+    console.log(
+      `[MercadoPago Diagnóstico] GET /v1/payment_methods falhou com HTTP ${pmStatus}:`,
+      sanitizeDiagnosticBody(pmBody)
+    );
+
+    // Tratamento específico de erro HTTP 400 (invalid_token retornado pelo Mercado Pago)
+    if (pmStatus === 400 && (pmBody?.message === 'invalid_token' || pmBody?.error === 'bad_request')) {
+      const detailStr = pmBody?.message || 'invalid_token';
+      return {
+        success: false,
+        status: 400,
+        failed_endpoint: '/v1/payment_methods',
+        error_details: detailStr,
+        message: `Token rejeitado pelo Mercado Pago (HTTP 400: ${detailStr}). O Access Token informado é inválido, expirou ou foi revogado. Verifique se você copiou o "Access Token de Produção" completo (iniciado com APP_USR-) e não a Public Key ou Client Secret.`,
+      };
+    }
+
+    if (pmStatus === 401 || pmStatus === 403) {
+      const detail = pmBody?.message || pmBody?.error || `HTTP ${pmStatus}`;
+      return {
+        success: false,
+        status: pmStatus,
+        failed_endpoint: '/v1/payment_methods',
+        error_details: detail,
+        message: `Credencial inválida ou sem permissão na API de pagamentos (HTTP ${pmStatus}: ${detail}). Verifique o Access Token de Produção no portal de Desenvolvedores do Mercado Pago.`,
+      };
+    }
+
+    const detailMsg = pmBody?.message || pmBody?.error || `HTTP ${pmStatus}`;
+    return {
+      success: false,
+      status: pmStatus || usersMeStatus || 500,
+      failed_endpoint: '/v1/payment_methods',
+      error_details: detailMsg,
+      message: `A API de Pagamentos do Mercado Pago (/v1/payment_methods) retornou HTTP ${pmStatus}: ${detailMsg}.`,
+    };
   } catch (err: any) {
     const isTimeout = err.name === 'TimeoutError' || err.message?.includes('timeout') || err.message?.includes('abort');
+    console.warn(`[MercadoPago Diagnóstico] Exceção de rede: ${err.message}`);
     return {
       success: false,
       status: 502,

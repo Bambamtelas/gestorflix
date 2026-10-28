@@ -49,7 +49,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     }
     const errorMsg = data.message || data.error || `Erro HTTP ${response.status}`;
     const err = new Error(errorMsg) as any;
-    err.status = response.status;
+    err.status = data.status || response.status;
     err.code = data.error;
     err.details = data;
     throw err;

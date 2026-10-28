@@ -3691,9 +3691,11 @@ async function startServer() {
           message: testResult.message,
         });
       } else {
-        return res.json({
+        return res.status(400).json({
           success: false,
           status: testResult.status || 400,
+          failed_endpoint: testResult.failed_endpoint,
+          error_details: testResult.error_details,
           message: testResult.message,
         });
       }
