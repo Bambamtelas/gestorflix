@@ -310,7 +310,7 @@ export async function testMercadoPagoConnection(tokenToTest?: string): Promise<{
   }
 
   try {
-    const res = await fetch('https://api.mercadopago.com/v1/users/me', {
+    const res = await fetch('https://api.mercadopago.com/users/me', {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${rawToken}`,

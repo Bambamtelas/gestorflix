@@ -3691,9 +3691,9 @@ async function startServer() {
           message: testResult.message,
         });
       } else {
-        return res.status(testResult.status && testResult.status < 500 ? testResult.status : 502).json({
+        return res.json({
           success: false,
-          status: testResult.status || 502,
+          status: testResult.status || 400,
           message: testResult.message,
         });
       }
